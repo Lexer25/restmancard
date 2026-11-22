@@ -1,0 +1,113 @@
+<?php defined('SYSPATH') or die('No direct script access.');
+
+/**
+ * Настройки модуля restmancard.
+ *
+ * Модуль читает данные из Artonit REST API v2, контракт которого описан
+ * в http://localhost:5056/swagger/v2/swagger.json.
+ *
+ * Логин и пароль можно переопределить переменными окружения:
+ *   RESTMANCARD_API_USER, RESTMANCARD_API_PASSWORD, RESTMANCARD_API_URL.
+ */
+return array(
+
+    'api' => array(
+        // Базовый адрес сервиса без завершающего слэша
+        'base_url' => getenv('RESTMANCARD_API_URL') ?: 'http://localhost:5056',
+
+        // Метод авторизации сервиса: GET /login?username=...&pasword=...
+        // (имя параметра пароля в сервисе действительно "pasword")
+        'login_path' => '/login',
+        'login_username' => getenv('RESTMANCARD_API_USER') ?: 'ADMIN',
+        'login_password' => getenv('RESTMANCARD_API_PASSWORD') ?: '333',
+        'login_password_field' => 'pasword',
+
+        // Время жизни полученного JWT в секундах (сервис выдаёт токен на сутки,
+        // но обновляем его чаще, чтобы не работать с просроченным токеном)
+        'token_ttl' => 3600,
+
+        // Таймауты HTTP-запросов, секунды
+        'timeout' => 20,
+        'connect_timeout' => 5,
+
+        // Проверять SSL-сертификат (для локального http-сервиса не требуется)
+        'verify_ssl' => false,
+    ),
+
+    'organizations' => array(
+        // REST API v2 принимает pageSize от 1 до 100
+        'page_size' => 100,
+
+        // Предохранитель от бесконечной пагинации: не более N страниц
+        'max_pages' => 50,
+
+        // Ограничение глубины рекурсии при построении дерева
+        'max_depth' => 25,
+
+        // Организация-приёмник для сотрудников, чью организацию определить
+        // не удалось (нет строки в PEOPLE, ошибка БД или org_map = false).
+        // POST /api/v2/Person создаёт сотрудника в ID_ORG = 1 — это dv_All.
+        // Пустая строка — взять первую корневую организацию.
+        'people_root_divcode' => 'dv_All',
+
+        // Время кеширования ответов API, секунды (0 — без кеша)
+        'cache_lifetime' => 60,
+
+        // --- Автоматическое формирование divcode -------------------------
+        // Префикс автоматически сформированного кода (как у dv_All, dv_Guest)
+        'divcode_prefix' => 'dv_',
+
+        // Сколько номерных суффиксов (_2, _3, ...) перебрать, если код занят
+        'divcode_max_attempts' => 100,
+
+        // Сколько раз повторить POST при ответе 409 (код занят в базе),
+        // формируя новый код: кеш списка организаций может быть устаревшим
+        'divcode_retry_on_conflict' => 5,
+    ),
+
+    'people' => array(
+        // GET /api/v2/Person/GetList принимает pageSize до 1000
+        'page_size' => 100,
+
+        // Предохранитель: не более N страниц сотрудников
+        'max_pages' => 20,
+
+        'cache_lifetime' => 60,
+
+        // --- Привязка сотрудников к организациям -------------------------
+        // REST API v2 не возвращает организацию сотрудника в
+        // GET /api/v2/Person/GetList, поэтому ID_ORG читается из Firebird
+        // (таблица PEOPLE, ключ — TABNUM): это та же база, с которой
+        // работает REST-сервис. false — не обращаться к БД: все сотрудники
+        // будут показаны у организации people_root_divcode.
+        'org_map' => true,
+
+        // Инстанс базы Kohana (application/config/database.php)
+        'org_map_db' => 'fb',
+
+        // Какие организации учитывать: ID_DB = 1 — база City
+        'org_map_id_db' => 1,
+
+        // true — учитывать только активных сотрудников ("ACTIVE" = 1)
+        'org_map_active_only' => false,
+
+        // Время кеширования карты TABNUM -> ID_ORG, секунды
+        'org_map_cache_lifetime' => 60,
+
+        // --- Автоматический табельный номер ------------------------------
+        // POST /api/v2/Person принимает tabnum необязательным: без него
+        // сервис формирует номер как tn_<ID сотрудника>. При ответе 409
+        // (номер заняли между формированием и вставкой) запрос повторяется,
+        // чтобы API сформировал следующий номер.
+        'tabnum_retry_on_conflict' => 3,
+    ),
+
+    'identifiers' => array(
+        // Идентификаторы (карты) необязательны: если сервис их не отдаёт,
+        // дерево и свойства сотрудника всё равно работают
+        'enabled' => true,
+        'page_size' => 100,
+        'max_pages' => 10,
+        'cache_lifetime' => 60,
+    ),
+);
