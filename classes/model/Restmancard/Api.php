@@ -172,6 +172,8 @@ class Model_Restmancard_Api extends Model
             self::CACHE_PREFIX . 'people_org',
             self::CACHE_PREFIX . 'identifiers',
             self::CACHE_PREFIX . 'idtypes',
+            self::CACHE_PREFIX . 'access_categories',
+            self::CACHE_PREFIX . 'access_people_map',
             self::CACHE_PREFIX . 'token',
         );
 

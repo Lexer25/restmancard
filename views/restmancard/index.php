@@ -23,9 +23,13 @@
  * @var string $focus_divcode
  * @var string $focus_person
  * @var string $divcode_prefix
+ * @var array  $access_categories
+ * @var string|NULL $access_error
+ * @var bool   $access_truncated
+ * @var string $access_url
  */
 ?>
-<?php echo HTML::style('static/css/restmancard.css?v=1.7.0'); ?>
+<?php echo HTML::style('static/css/restmancard.css?v=1.8.0'); ?>
 
 <div class="panel panel-primary rc-root">
     <div class="panel-heading">
@@ -245,26 +249,75 @@
                             <span class="glyphicon glyphicon-lock"></span>
                             <?php echo __('Категории доступа'); ?>
                             <span class="pull-right">
-                                <span class="badge" id="rc-access-count">0</span>
+                                <span class="badge rc-access-count" id="rc-access-count"
+                                      title="<?php echo __('Выдано выбранному элементу / всего категорий'); ?>">0 / <?php echo count($access_categories); ?></span>
                             </span>
                         </h4>
                     </div>
 
                     <div class="panel-body" id="rc-access">
-                        <div class="text-center text-muted rc-placeholder">
-                            <span class="glyphicon glyphicon-lock" style="font-size: 3em;"></span>
-                            <p><?php echo __('Раздел «Категории доступа» нарисован, но не заполняется.'); ?></p>
-                            <p class="small">
-                                <?php echo __('В этой версии модуля категории доступа не загружаются из REST API.'); ?>
-                            </p>
+                        <div class="alert rc-access-alert" id="rc-access-alert" style="display: none;"></div>
+
+                        <div class="rc-access-loading" id="rc-access-loading" style="display: none;">
+                            <span class="glyphicon glyphicon-refresh glyphicon-spin"></span>
+                            <?php echo __('Загрузка категорий доступа...'); ?>
                         </div>
+
+                        <div class="rc-access-summary text-muted" id="rc-access-summary">
+                            <?php if ($access_error === NULL AND ! empty($access_categories)): ?>
+                                <?php echo __('Всего категорий'); ?>: <strong><?php echo count($access_categories); ?></strong>.
+                                <?php echo __('Выберите организацию или сотрудника, чтобы увидеть выданные категории.'); ?>
+                            <?php endif; ?>
+                        </div>
+
+                        <?php if ($access_error !== NULL): ?>
+                            <div class="alert alert-danger rc-access-error">
+                                <span class="glyphicon glyphicon-warning-sign"></span>
+                                <strong><?php echo __('Категории доступа недоступны.'); ?></strong>
+                                <div class="rc-access-error-text"><?php echo HTML::chars($access_error); ?></div>
+                                <div class="small rc-error-hint">
+                                    <?php echo __('Проверьте, что REST API отвечает на'); ?>
+                                    <code><?php echo HTML::chars($api_url); ?>/api/v2/Access/GetList</code>
+                                </div>
+                            </div>
+                        <?php elseif (empty($access_categories)): ?>
+                            <div class="text-center text-muted rc-placeholder">
+                                <span class="glyphicon glyphicon-lock" style="font-size: 3em;"></span>
+                                <p><?php echo __('Категории доступа не найдены.'); ?></p>
+                            </div>
+                        <?php else: ?>
+                            <div class="rc-access-list" id="rc-access-list">
+                                <?php foreach ($access_categories as $category): ?>
+                                    <div class="rc-access-item"
+                                         data-access-id="<?php echo (int) $category['ID']; ?>"
+                                         title="ID_ACCESSNAME: <?php echo (int) $category['ID']; ?>">
+                                        <span class="rc-access-icon glyphicon glyphicon-lock"></span>
+                                        <span class="rc-access-name"><?php echo HTML::chars($category['NAME']); ?></span>
+                                        <span class="rc-access-marks"></span>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
                     </div>
 
                     <div class="panel-footer">
-                        <small class="text-muted">
-                            <span class="glyphicon glyphicon-info-sign"></span>
-                            <?php echo __('Требование контракта: раздел отображается без данных.'); ?>
+                        <small class="text-muted rc-access-legend">
+                            <span class="label label-primary"><?php echo __('организация'); ?></span>
+                            <?php echo __('— категория выдана организации'); ?>
+                            &nbsp;·&nbsp;
+                            <span class="label label-success"><?php echo __('сотрудник'); ?></span>
+                            <?php echo __('— категория выдана сотруднику'); ?>
+                            &nbsp;·&nbsp;
+                            <span class="label label-warning"><?php echo __('различие'); ?></span>
+                            <?php echo __('— наборы различаются'); ?>
                         </small>
+
+                        <?php if ($access_truncated): ?>
+                            <div class="text-warning rc-limit-note">
+                                <span class="glyphicon glyphicon-warning-sign"></span>
+                                <?php echo __('Список категорий доступа ограничен настройкой access.max_pages.'); ?>
+                            </div>
+                        <?php endif; ?>
                     </div>
                 </div>
             </div>
@@ -529,16 +582,37 @@ window.RESTMANCARD = <?php echo $data_json; ?>;
 </script>
 
 <script>
+window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
+    'url'    => (string) $access_url,
+    'total'  => count($access_categories),
+    'loaded' => ($access_error === NULL),
+)); ?>;
+</script>
+
+<script>
 (function ($) {
     'use strict';
 
     var DATA = window.RESTMANCARD || { orgs: {}, people: {}, meta: {} };
     var META = DATA.meta || {};
+    var ACCESS = window.RESTMANCARD_ACCESS || { url: '', total: 0, loaded: false };
+    var accessUrl = ACCESS.url || '';
+    var accessTotal = parseInt(ACCESS.total, 10);
+    if (isNaN(accessTotal) || accessTotal < 0) {
+        accessTotal = 0;
+    }
     var $tree = $('#rc-tree');
     var $props = $('#rc-properties');
+    var $accessList = $('#rc-access-list');
+    var $accessCount = $('#rc-access-count');
+    var $accessSummary = $('#rc-access-summary');
+    var $accessAlert = $('#rc-access-alert');
+    var $accessLoading = $('#rc-access-loading');
     var searchTimer = null;
     var selectedOrgUid = null;
     var selectedPersonUid = null;
+    var accessRequest = 0;
+    var accessNameMap = null;
 
     // ===== Вспомогательные функции =====
 
@@ -627,6 +701,290 @@ window.RESTMANCARD = <?php echo $data_json; ?>;
             .attr('title', title);
     }
 
+    // ===== Панель «Категории доступа» =====
+
+    function accessNameById() {
+        if (accessNameMap !== null) {
+            return accessNameMap;
+        }
+
+        accessNameMap = {};
+
+        $accessList.find('.rc-access-item').each(function () {
+            var id = String($(this).attr('data-access-id'));
+            accessNameMap[id] = $.trim($(this).find('.rc-access-name').text());
+        });
+
+        return accessNameMap;
+    }
+
+    function accessIdSet(values) {
+        var set = {};
+
+        if (!values || !values.length) {
+            return set;
+        }
+
+        for (var i = 0; i < values.length; i++) {
+            var id = Number(values[i]);
+
+            if (isFinite(id)) {
+                set[String(id)] = true;
+            }
+        }
+
+        return set;
+    }
+
+    function accessIdsFromSet(set) {
+        var ids = [];
+
+        for (var key in set) {
+            if (Object.prototype.hasOwnProperty.call(set, key)) {
+                ids.push(Number(key));
+            }
+        }
+
+        ids.sort(function (a, b) {
+            return a - b;
+        });
+
+        return ids;
+    }
+
+    function formatAccessNames(ids, limit) {
+        var names = accessNameById();
+        var shown = [];
+        var max = limit || 8;
+
+        for (var i = 0; i < ids.length && i < max; i++) {
+            var id = String(ids[i]);
+            shown.push(names[id] || ('#' + id));
+        }
+
+        var rest = ids.length - shown.length;
+
+        return shown.join(', ') + (rest > 0 ? ' ' + <?php echo json_encode(__('и ещё')); ?> + ' ' + rest : '');
+    }
+
+    function setAccessBadge(count) {
+        $accessCount
+            .text(count + ' / ' + accessTotal)
+            .attr('title', <?php echo json_encode(__('Выдано выбранному элементу / всего категорий')); ?>);
+    }
+
+    function accessSummary(className, html) {
+        $accessSummary
+            .removeClass('alert alert-info alert-success alert-warning alert-danger text-muted')
+            .addClass(className)
+            .html(html);
+    }
+
+    function setAccessLoading(loading) {
+        $accessLoading.toggle(!!loading);
+    }
+
+    function hideAccessAlert() {
+        $accessAlert
+            .removeClass('alert-danger alert-warning alert-info alert-success')
+            .hide()
+            .empty();
+    }
+
+    function showAccessAlert(html, type) {
+        var className = 'alert-danger';
+
+        if (type === 'warning') {
+            className = 'alert-warning';
+        } else if (type === 'info') {
+            className = 'alert-info';
+        } else if (type === 'success') {
+            className = 'alert-success';
+        }
+
+        $accessAlert
+            .removeClass('alert-danger alert-warning alert-info alert-success')
+            .addClass(className)
+            .html(html)
+            .show();
+    }
+
+    function clearAccessMarks() {
+        $accessList.find('.rc-access-item')
+            .removeClass('rc-access-org rc-access-person rc-access-both rc-access-diff rc-access-only-person rc-access-only-org')
+            .find('.rc-access-marks')
+            .empty();
+    }
+
+    function setAccessMarks($item, marks) {
+        var $marks = $item.find('.rc-access-marks').empty();
+
+        for (var i = 0; i < marks.length; i++) {
+            $('<span class="label ' + marks[i].className + '"></span>')
+                .text(marks[i].text)
+                .appendTo($marks);
+        }
+    }
+
+    function clearAccessState() {
+        clearAccessMarks();
+        accessSummary('text-muted', esc(<?php echo json_encode(__('Выберите организацию или сотрудника, чтобы увидеть выданные категории.')); ?>));
+    }
+
+    function applyAccessState(type, response) {
+        var assigned = accessIdSet(response.assigned);
+        var orgAssigned = accessIdSet(response.org_assigned);
+        // Для организации её набор приходит в assigned, для сотрудника —
+        // организация отдельно в org_assigned.
+        var orgSet = (type === 'org') ? assigned : orgAssigned;
+        var orgLoaded = (response.org_loaded !== false);
+        var assignedIds = accessIdsFromSet(assigned);
+        var orgIds = accessIdsFromSet(orgAssigned);
+
+        var labelOrg = <?php echo json_encode(__('организация')); ?>;
+        var labelPerson = <?php echo json_encode(__('сотрудник')); ?>;
+        var labelOnlyPerson = <?php echo json_encode(__('только у сотрудника')); ?>;
+        var labelOnlyOrg = <?php echo json_encode(__('только в организации')); ?>;
+
+        $accessList.find('.rc-access-item').each(function () {
+            var $item = $(this);
+            var id = String($item.attr('data-access-id'));
+            var isPerson = Object.prototype.hasOwnProperty.call(assigned, id);
+            var isOrg = Object.prototype.hasOwnProperty.call(orgSet, id);
+            var marks = [];
+
+            $item.removeClass('rc-access-org rc-access-person rc-access-both rc-access-diff rc-access-only-person rc-access-only-org');
+
+            if (type === 'org') {
+                if (isOrg) {
+                    $item.addClass('rc-access-org');
+                    marks.push({ text: labelOrg, className: 'label-primary' });
+                }
+            } else if (isPerson && isOrg) {
+                $item.addClass('rc-access-both');
+                marks.push({ text: labelPerson, className: 'label-success' });
+                marks.push({ text: labelOrg, className: 'label-primary' });
+            } else if (isPerson && orgLoaded) {
+                $item.addClass('rc-access-diff rc-access-only-person');
+                marks.push({ text: labelOnlyPerson, className: 'label-warning' });
+            } else if (isPerson) {
+                $item.addClass('rc-access-person');
+                marks.push({ text: labelPerson, className: 'label-success' });
+            } else if (isOrg) {
+                $item.addClass('rc-access-diff rc-access-only-org');
+                marks.push({ text: labelOnlyOrg, className: 'label-warning' });
+            }
+
+            setAccessMarks($item, marks);
+        });
+
+        setAccessBadge(assignedIds.length);
+
+        if (type === 'org') {
+            if (assignedIds.length === 0) {
+                accessSummary('alert alert-info', esc(<?php echo json_encode(__('Организации не выдано ни одной категории доступа.')); ?>));
+            } else {
+                accessSummary('alert alert-info', esc(<?php echo json_encode(__('Организации выдано категорий')); ?>)
+                    + ': <strong>' + assignedIds.length + '</strong>.');
+            }
+        } else if (!orgLoaded) {
+            accessSummary('alert alert-info', esc(<?php echo json_encode(__('У сотрудника категорий')); ?>)
+                + ': <strong>' + assignedIds.length + '</strong>. '
+                + esc(<?php echo json_encode(__('Категории организации не загружены: сравнение наборов недоступно.')); ?>));
+        } else if (response.different) {
+            var parts = [];
+
+            parts.push(esc(<?php echo json_encode(__('Наборы различаются.')); ?>));
+            parts.push(esc(<?php echo json_encode(__('У сотрудника')); ?>) + ': <strong>' + assignedIds.length + '</strong>, '
+                + esc(<?php echo json_encode(__('в организации')); ?>) + ': <strong>' + orgIds.length + '</strong>, '
+                + esc(<?php echo json_encode(__('совпадает')); ?>) + ': <strong>' + (response.common || []).length + '</strong>.');
+
+            if ((response.only_person || []).length) {
+                parts.push(esc(<?php echo json_encode(__('Только у сотрудника')); ?>) + ': '
+                    + esc(formatAccessNames(response.only_person, 8)) + '.');
+            }
+
+            if ((response.only_org || []).length) {
+                parts.push(esc(<?php echo json_encode(__('Только в организации')); ?>) + ': '
+                    + esc(formatAccessNames(response.only_org, 8)) + '.');
+            }
+
+            parts.push(esc(<?php echo json_encode(__('Жёлтым выделены различающиеся категории.')); ?>));
+
+            accessSummary('alert alert-warning', parts.join(' '));
+        } else if (assignedIds.length === 0 && orgIds.length === 0) {
+            accessSummary('alert alert-success', esc(<?php echo json_encode(__('Наборы совпадают: ни сотруднику, ни организации категории не выданы.')); ?>));
+        } else {
+            accessSummary('alert alert-success', esc(<?php echo json_encode(__('Наборы совпадают: у сотрудника и в организации по')); ?>)
+                + ' <strong>' + assignedIds.length + '</strong> '
+                + esc(<?php echo json_encode(__('категорий.')); ?>));
+        }
+
+        if (response.warnings && response.warnings.length) {
+            var lines = [];
+
+            for (var i = 0; i < response.warnings.length; i++) {
+                lines.push(esc(response.warnings[i]));
+            }
+
+            showAccessAlert(lines.join('<br>'), 'warning');
+        } else {
+            hideAccessAlert();
+        }
+    }
+
+    function loadAccess(type, params) {
+        if (!accessUrl || !$accessList.length) {
+            return;
+        }
+
+        var seq = ++accessRequest;
+        var data = $.extend({ type: type }, params || {});
+
+        setAccessLoading(true);
+        hideAccessAlert();
+
+        $.ajax({
+            url: accessUrl,
+            type: 'POST',
+            data: data,
+            dataType: 'json'
+        }).done(function (response) {
+            if (seq !== accessRequest) {
+                return;
+            }
+
+            setAccessLoading(false);
+
+            if (!response || !response.success) {
+                clearAccessState();
+                setAccessBadge(0);
+                showAccessAlert(esc((response && response.message) || <?php echo json_encode(__('Не удалось загрузить категории доступа')); ?>), 'danger');
+                return;
+            }
+
+            applyAccessState(type, response);
+        }).fail(function (xhr) {
+            if (seq !== accessRequest) {
+                return;
+            }
+
+            setAccessLoading(false);
+            clearAccessState();
+            setAccessBadge(0);
+
+            var message = <?php echo json_encode(__('Не удалось загрузить категории доступа')); ?>;
+
+            if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                message = xhr.responseJSON.message;
+            } else if (xhr && xhr.status) {
+                message += ' (HTTP ' + xhr.status + ')';
+            }
+
+            showAccessAlert(esc(message), 'danger');
+        });
+    }
+
     // ===== Панель «Свойства» =====
 
     function showOrg(uid) {
@@ -690,6 +1048,8 @@ window.RESTMANCARD = <?php echo $data_json; ?>;
         selectedOrgUid = uid;
         selectedPersonUid = null;
         updateDeleteButton();
+
+        loadAccess('org', { divcode: o.divcode });
     }
 
     function showPerson(uid) {
@@ -727,6 +1087,13 @@ window.RESTMANCARD = <?php echo $data_json; ?>;
 
         selectedPersonUid = uid;
         updateDeleteButton();
+
+        loadAccess('person', {
+            tabnum: p.tabnum,
+            // Сотрудник в организации-приёмнике: его ID_ORG неизвестен,
+            // сравнивать наборы с этой организацией нельзя.
+            divcode: (p.org_known === false) ? '' : (p.org_divcode || '')
+        });
     }
 
     // ===== Дерево =====

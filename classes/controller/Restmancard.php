@@ -7,8 +7,8 @@
  * Страница повторяет трёхпанельную компоновку mancard/index:
  *   1) дерево организаций и сотрудников;
  *   2) свойства выбранного элемента;
- *   3) категории доступа — раздел нарисован, но не заполняется
- *      (требование контракта модуля).
+ *   3) категории доступа: справочник целиком, подсветка категорий
+ *      выбранной организации/сотрудника и разница наборов.
  *
  * Поддерживается добавление и удаление организаций и сотрудников
  * через REST API v2.
@@ -51,6 +51,14 @@ class Controller_Restmancard extends Controller_Template
     protected function _people()
     {
         return Model::factory('Restmancard_People');
+    }
+
+    /**
+     * @return  Model_Restmancard_Access
+     */
+    protected function _access()
+    {
+        return Model::factory('Restmancard_Access');
     }
 
     /**
@@ -108,6 +116,20 @@ class Controller_Restmancard extends Controller_Template
                 ':file'    => $e->getFile(),
                 ':line'    => $e->getLine(),
             ));
+        }
+
+        // Справочник категорий доступа нужен панели сразу, без выбора
+        // элемента. Ошибка Access/GetList не должна ломать дерево: панель
+        // покажет сообщение, остальные данные останутся доступны.
+        $access_model = $this->_access();
+        $access_bundle = $access_model->getCategories();
+        $access_categories = $access_bundle['categories'];
+        $access_error = $access_bundle['error'];
+        $access_truncated = ! empty($access_bundle['truncated']);
+
+        if ($access_error !== NULL)
+        {
+            $warnings[] = 'Не удалось загрузить категории доступа: ' . $access_error;
         }
 
         // Данные для панели «Свойства» (JSON для JS)
@@ -179,9 +201,200 @@ class Controller_Restmancard extends Controller_Template
             'focus_divcode'   => $focus_divcode,
             'focus_person'    => $focus_person,
             'divcode_prefix'  => $org_model->getDivcodePrefix(),
+            'access_categories' => $access_categories,
+            'access_error'      => $access_error,
+            'access_truncated'  => $access_truncated,
+            'access_url'        => URL::site('restmancard/access'),
         ));
 
         $this->template->content = $content;
+    }
+
+    /**
+     * AJAX: категории доступа выбранной организации или сотрудника.
+     *
+     * Параметры (GET или POST):
+     *   type     — org | person;
+     *   divcode  — организация (для type=org; для type=person — организация
+     *              сотрудника, нужна только для сравнения наборов);
+     *   tabnum   — сотрудник (для type=person).
+     *
+     * Ответ для организации: assigned = ID_ACCESSNAME организации.
+     * Ответ для сотрудника: assigned = его категории, org_assigned =
+     * категории его организации, common / only_person / only_org — разница
+     * наборов, different — наборы различаются.
+     *
+     * @return  void
+     */
+    public function action_access()
+    {
+        $this->auto_render = FALSE;
+
+        $method = strtoupper((string) $this->request->method());
+
+        if ($method !== 'GET' AND $method !== 'POST')
+        {
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => 'Метод не поддерживается',
+            ), 405);
+            return;
+        }
+
+        $params = ($method === 'POST') ? $this->request->post() : $this->request->query();
+        $type = strtolower(trim((string) Arr::get($params, 'type', '')));
+        $access_model = $this->_access();
+
+        try
+        {
+            if ($type === 'org')
+            {
+                $divcode = trim((string) Arr::get($params, 'divcode', ''));
+
+                if ($divcode === '')
+                {
+                    $this->_json(array(
+                        'success' => FALSE,
+                        'message' => 'Не выбрана организация для показа категорий доступа',
+                        'type'    => 'org',
+                    ));
+                    return;
+                }
+
+                $org_access = $access_model->getOrganizationAccess($divcode);
+
+                if ($org_access['error'] !== NULL)
+                {
+                    $this->_json(array(
+                        'success' => FALSE,
+                        'message' => 'Не удалось получить категории доступа организации: '
+                            . $org_access['error'],
+                        'type'    => 'org',
+                        'divcode' => $divcode,
+                    ));
+                    return;
+                }
+
+                $this->_json(array(
+                    'success'      => TRUE,
+                    'type'         => 'org',
+                    'divcode'      => $divcode,
+                    'assigned'     => $org_access['ids'],
+                    'org_assigned' => array(),
+                    'common'       => array(),
+                    'only_person'  => array(),
+                    'only_org'     => array(),
+                    'different'    => FALSE,
+                    'org_loaded'   => TRUE,
+                    'warnings'     => array(),
+                ));
+                return;
+            }
+
+            if ($type === 'person')
+            {
+                $tabnum = trim((string) Arr::get($params, 'tabnum', ''));
+                $divcode = trim((string) Arr::get($params, 'divcode', ''));
+
+                if ($tabnum === '')
+                {
+                    $this->_json(array(
+                        'success' => FALSE,
+                        'message' => 'Не выбран сотрудник для показа категорий доступа',
+                        'type'    => 'person',
+                    ));
+                    return;
+                }
+
+                $person_access = $access_model->getPersonAccess($tabnum);
+
+                if ($person_access['error'] !== NULL)
+                {
+                    $this->_json(array(
+                        'success' => FALSE,
+                        'message' => 'Не удалось получить категории доступа сотрудника: '
+                            . $person_access['error'],
+                        'type'    => 'person',
+                        'tabnum'  => $tabnum,
+                    ));
+                    return;
+                }
+
+                $warnings = $person_access['warnings'];
+                $org_ids = array();
+                $org_loaded = FALSE;
+                $org_error = NULL;
+
+                if ($divcode !== '')
+                {
+                    $org_access = $access_model->getOrganizationAccess($divcode);
+
+                    if ($org_access['error'] !== NULL)
+                    {
+                        $org_error = $org_access['error'];
+                        $warnings[] = 'Категории организации не загружены, сравнение наборов '
+                            . 'недоступно: ' . $org_error;
+                    }
+                    else
+                    {
+                        $org_ids = $org_access['ids'];
+                        $org_loaded = TRUE;
+                    }
+                }
+                else
+                {
+                    $org_error = 'Организация сотрудника не определена';
+                    $warnings[] = 'Организация сотрудника не определена: сравнить наборы '
+                        . 'категорий невозможно.';
+                }
+
+                $diff = $access_model->compareSets($person_access['ids'], $org_ids);
+
+                // Без категорий организации разница не считается: иначе все
+                // категории сотрудника выглядели бы «только его».
+                if ( ! $org_loaded)
+                {
+                    $diff['common'] = array();
+                    $diff['only_person'] = array();
+                    $diff['only_org'] = array();
+                    $diff['different'] = FALSE;
+                }
+
+                $this->_json(array(
+                    'success'      => TRUE,
+                    'type'         => 'person',
+                    'tabnum'       => $tabnum,
+                    'divcode'      => $divcode,
+                    'assigned'     => $diff['person'],
+                    'org_assigned' => $diff['org'],
+                    'common'       => $diff['common'],
+                    'only_person'  => $diff['only_person'],
+                    'only_org'     => $diff['only_org'],
+                    'different'    => $diff['different'],
+                    'org_loaded'   => $org_loaded,
+                    'org_error'    => $org_error,
+                    'warnings'     => $warnings,
+                ));
+                return;
+            }
+
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => 'Неверный тип элемента: ожидается org или person',
+            ));
+        }
+        catch (Exception $e)
+        {
+            Kohana::$log->add(Log::ERROR, 'restmancard: не удалось получить категории доступа: :message' . PHP_EOL . $e->getTraceAsString(), array(
+                ':message' => $e->getMessage(),
+            ));
+
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => $e->getMessage(),
+                'type'    => $type,
+            ));
+        }
     }
 
     /**
@@ -759,6 +972,7 @@ class Controller_Restmancard extends Controller_Template
                     'full_name'   => $person['FULL_NAME'],
                     'org_name'    => $node['NAME'],
                     'org_divcode' => $node['DIVCODE'],
+                    'org_known'   => empty($node['IS_PEOPLE_ROOT']),
                     'identifiers' => $this->_identifiers_for_json($person['IDENTIFIERS']),
                 );
             }
