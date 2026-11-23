@@ -31,7 +31,7 @@
  * @var string $save_access_url
  */
 ?>
-<?php echo HTML::style('static/css/restmancard.css?v=1.9.0'); ?>
+<?php echo HTML::style('static/css/restmancard.css?v=2.0.0'); ?>
 
 <div class="panel panel-primary rc-root">
     <div class="panel-heading">

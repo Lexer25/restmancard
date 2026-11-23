@@ -1078,6 +1078,182 @@ class Model_Restmancard_Org extends Model
     }
 
     /**
+     * Дерево организаций без сотрудников.
+     *
+     * Отдельная форма `restmancard/organizations` работает только с
+     * организациями, поэтому сотрудники не читаются вовсе: ни
+     * GET /api/v2/Person/GetList, ни GET /api/v2/Identifier/GetList, ни карта
+     * TABNUM -> ID_ORG из Firebird. Узлы дерева содержат только реквизиты
+     * организации и счётчики подразделений.
+     *
+     * @param   string  $focus_code  divcode организации, ветку которой нужно раскрыть
+     * @return  array
+     */
+    public function getOrganizationTree($focus_code = NULL)
+    {
+        $this->_warnings = array();
+        $this->_node_counter = 0;
+
+        $flat = $this->getAllOrganizations();
+
+        $nodes = array();
+        foreach ($flat as $org)
+        {
+            $code = trim((string) $org['DIVCODE']);
+            if ($code === '')
+            {
+                $code = '__id' . $org['ID'];
+            }
+
+            $org['DIVCODE'] = $code;
+
+            if ($org['NAME'] === '')
+            {
+                $org['NAME'] = 'Без названия (' . $code . ')';
+            }
+
+            $nodes[$code] = $org;
+        }
+
+        if (empty($nodes))
+        {
+            $this->_stats = array(
+                'organizations'  => 0,
+                'roots'          => 0,
+                'truncated_orgs' => FALSE,
+                'people'         => 0,
+            );
+
+            return array();
+        }
+
+        // Связи «родитель -> дети» и корневые узлы
+        $children_map = array();
+        $root_codes = array();
+
+        foreach ($nodes as $code => $org)
+        {
+            $parent = $org['PARENT'];
+
+            if ($parent !== NULL AND $parent !== '' AND $parent !== $code AND isset($nodes[$parent]))
+            {
+                $children_map[$parent][] = $code;
+            }
+            else
+            {
+                $root_codes[] = $code;
+            }
+        }
+
+        $this->_sort_codes($root_codes, $nodes);
+        foreach (array_keys($children_map) as $parent_code)
+        {
+            $this->_sort_codes($children_map[$parent_code], $nodes);
+        }
+
+        $max_depth = (int) $this->_config['max_depth'];
+        if ($max_depth < 1)
+        {
+            $max_depth = 25;
+        }
+
+        $visited = array();
+        $tree = array();
+
+        foreach ($root_codes as $code)
+        {
+            $branch = $this->_build_org_node($code, $nodes, $children_map, $visited, 0, $max_depth, '');
+            if ($branch !== NULL)
+            {
+                $tree[] = $branch;
+            }
+        }
+
+        // Раскрываем ветку до только что изменённой организации
+        $focus_code = trim((string) $focus_code);
+        if ($focus_code !== '')
+        {
+            $this->_mark_expanded($tree, $focus_code);
+        }
+
+        // Единственный корень удобно раскрыть сразу
+        if (count($tree) === 1)
+        {
+            $tree[0]['EXPANDED'] = TRUE;
+        }
+
+        $this->_stats = array(
+            'organizations'  => count($nodes),
+            'roots'          => count($tree),
+            'truncated_orgs' => $this->_organizations_truncated($nodes),
+            'people'         => 0,
+        );
+
+        return $tree;
+    }
+
+    /**
+     * Построить узел дерева организаций (без сотрудников) рекурсивно.
+     *
+     * @param   string  $code
+     * @param   array   $nodes
+     * @param   array   $children_map
+     * @param   array   $visited
+     * @param   int     $level
+     * @param   int     $max_depth
+     * @param   string  $parent_path
+     * @return  array|NULL
+     */
+    protected function _build_org_node($code, array $nodes, array $children_map,
+        array & $visited, $level, $max_depth, $parent_path)
+    {
+        if (isset($visited[$code]) OR $level > $max_depth OR ! isset($nodes[$code]))
+        {
+            return NULL;
+        }
+
+        $visited[$code] = TRUE;
+
+        $node = $nodes[$code];
+
+        $node['LEVEL'] = $level;
+        $node['UID'] = 'o' . (++$this->_node_counter);
+        $node['PATH'] = $parent_path === '' ? $node['NAME'] : $parent_path . ' / ' . $node['NAME'];
+        $node['EXPANDED'] = FALSE;
+
+        $children = array();
+        $total_children = 0;
+
+        if (isset($children_map[$code]))
+        {
+            foreach ($children_map[$code] as $child_code)
+            {
+                $child = $this->_build_org_node(
+                    $child_code,
+                    $nodes,
+                    $children_map,
+                    $visited,
+                    $level + 1,
+                    $max_depth,
+                    $node['PATH']
+                );
+
+                if ($child !== NULL)
+                {
+                    $children[] = $child;
+                    $total_children += 1 + $child['TOTAL_CHILDREN'];
+                }
+            }
+        }
+
+        $node['CHILDREN'] = $children;
+        $node['CHILDREN_COUNT'] = count($children);
+        $node['TOTAL_CHILDREN'] = $total_children;
+
+        return $node;
+    }
+
+    /**
      * Загрузить сотрудников, не прерывая построение дерева при ошибке.
      *
      * @return  array

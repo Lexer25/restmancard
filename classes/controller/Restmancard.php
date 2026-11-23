@@ -215,6 +215,132 @@ class Controller_Restmancard extends Controller_Template
     }
 
     /**
+     * Отдельная форма для работы с организациями (без сотрудников).
+     *
+     * Пункт меню «Организации» открывает форму из трёх панелей:
+     *   1) дерево организаций;
+     *   2) свойства выбранной организации (название, родитель, флаг);
+     *   3) набор категорий доступа выбранной организации.
+     *
+     * Панели сохраняются независимо: «Сохранить» в свойствах вызывает
+     * restmancard/save_organization (только PUT /api/v2/organizations),
+     * «Сохранить» в категориях — restmancard/save_access (только
+     * PUT /api/v2/organizations/{divcode}/accessnames).
+     *
+     * Сотрудники не читаются: используются только GET /api/v2/organizations
+     * и Access/GetList.
+     *
+     * @return  void
+     */
+    public function action_organizations()
+    {
+        $this->set_title('Организации (REST)');
+
+        $refresh = (bool) $this->request->query('refresh');
+        $focus_divcode = trim((string) $this->request->query('focus'));
+
+        if ($refresh)
+        {
+            $this->_api()->flush();
+        }
+
+        $error = NULL;
+        $warnings = array();
+        $tree = array();
+        $org_model = $this->_org();
+
+        $stats = array(
+            'organizations'  => 0,
+            'roots'          => 0,
+            'truncated_orgs' => FALSE,
+        );
+
+        try
+        {
+            $tree = $org_model->getOrganizationTree($focus_divcode);
+            $warnings = $org_model->getWarnings();
+
+            $model_stats = $org_model->getStats();
+            if (is_array($model_stats) AND ! empty($model_stats))
+            {
+                $stats = array_merge($stats, $model_stats);
+            }
+        }
+        catch (Exception $e)
+        {
+            $error = $e->getMessage();
+
+            Kohana::$log->add(Log::ERROR, 'restmancard: не удалось получить организации: :message (файл :file, строка :line)' . PHP_EOL . $e->getTraceAsString(), array(
+                ':message' => $e->getMessage(),
+                ':file'    => $e->getFile(),
+                ':line'    => $e->getLine(),
+            ));
+        }
+
+        // Справочник категорий доступа: без него форма работает только с
+        // названием и родителем, а сохранение набора категорий отключается.
+        $access_model = $this->_access();
+        $access_bundle = $access_model->getCategories();
+        $access_categories = $access_bundle['categories'];
+        $access_error = $access_bundle['error'];
+        $access_truncated = ! empty($access_bundle['truncated']);
+
+        if ($access_error !== NULL)
+        {
+            $warnings[] = 'Не удалось загрузить категории доступа: ' . $access_error;
+        }
+
+        // Плоские данные для формы: значения текущей организации и список
+        // вариантов родителя.
+        $orgs = array();
+        $this->_collect_orgs($tree, $orgs, '');
+
+        $data = array(
+            'orgs' => $orgs,
+            'meta' => array(
+                'focus' => $focus_divcode,
+            ),
+        );
+
+        $flags = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
+        $data_json = json_encode($data, $flags);
+
+        if ($data_json === FALSE)
+        {
+            $data_json = json_encode($data);
+        }
+
+        if ($data_json === FALSE)
+        {
+            $data_json = '{"orgs":{},"meta":{"focus":""}}';
+        }
+
+        $api_config = Kohana::$config->load('restmancard.api');
+        $api_url = is_array($api_config) ? (string) $api_config['base_url'] : '';
+
+        $content = View::factory('restmancard/organizations', array(
+            'tree'              => $tree,
+            'error'             => $error,
+            'warnings'          => $warnings,
+            'stats'             => $stats,
+            'data_json'         => $data_json,
+            'api_url'           => $api_url,
+            'generated_at'      => date('d.m.Y H:i:s'),
+            'refresh_url'       => URL::site('restmancard/organizations') . '?refresh=1',
+            'save_url'          => URL::site('restmancard/save_organization'),
+            'save_access_url'   => URL::site('restmancard/save_access'),
+            'access_url'        => URL::site('restmancard/access'),
+            'focus_divcode'     => $focus_divcode,
+            'access_categories' => $access_categories,
+            'access_error'      => $access_error,
+            'access_truncated'  => $access_truncated,
+            'access_editable'   => ($access_error === NULL AND ! empty($access_categories)),
+        ));
+
+        $this->template->content = $content;
+    }
+
+    /**
      * AJAX: категории доступа выбранной организации или сотрудника.
      *
      * Параметры (GET или POST):
@@ -612,6 +738,80 @@ class Controller_Restmancard extends Controller_Template
         }
 
         return $result;
+    }
+
+    /**
+     * AJAX: сохранить только свойства организации через
+     * PUT /api/v2/organizations/{divcode}.
+     *
+     * Метод вызывается кнопкой «Сохранить» панели «Свойства организации»
+     * формы restmancard/organizations и меняет только название, родительскую
+     * организацию и флаг. Набор категорий доступа он не читает и не пишет:
+     * за него отвечает отдельная панель «Набор категорий доступа» и метод
+     * restmancard/save_access. Благодаря этому сохранение свойств не может
+     * перезаписать или очистить выданные категории.
+     *
+     * @return  void
+     */
+    public function action_save_organization()
+    {
+        $this->auto_render = FALSE;
+
+        if ($this->request->method() !== 'POST')
+        {
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => 'Метод не поддерживается',
+            ), 405);
+            return;
+        }
+
+        $post = $this->request->post();
+        $divcode = trim((string) Arr::get($post, 'divcode', ''));
+        $org_model = $this->_org();
+
+        try
+        {
+            $errors = $org_model->validateOrganizationUpdate($post);
+
+            if ( ! empty($errors))
+            {
+                $this->_json(array(
+                    'success' => FALSE,
+                    'message' => reset($errors),
+                    'errors'  => $errors,
+                    'divcode' => $divcode,
+                ));
+                return;
+            }
+
+            // Только свойства организации: набор категорий доступа
+            // сохраняется отдельным методом restmancard/save_access.
+            $organization = $org_model->updateOrganization($divcode, $post);
+        }
+        catch (Exception $e)
+        {
+            Kohana::$log->add(Log::ERROR, 'restmancard: не удалось сохранить организацию :divcode: :message' . PHP_EOL . $e->getTraceAsString(), array(
+                ':divcode' => $divcode,
+                ':message' => $e->getMessage(),
+            ));
+
+            $this->_json($this->_edit_failure($e, $divcode));
+            return;
+        }
+
+        $this->_json(array(
+            'success'      => TRUE,
+            'message'      => 'Свойства организации сохранены',
+            'divcode'      => (string) $organization['DIVCODE'],
+            'organization' => array(
+                'id'      => (int) $organization['ID'],
+                'divcode' => (string) $organization['DIVCODE'],
+                'name'    => (string) $organization['NAME'],
+                'parent'  => $organization['PARENT'],
+                'flag'    => (int) $organization['FLAG'],
+            ),
+        ));
     }
 
     /**
@@ -1384,6 +1584,37 @@ class Controller_Restmancard extends Controller_Template
             );
 
             $this->_collect($node['CHILDREN'], $orgs, $people, $node['NAME']);
+        }
+    }
+
+    /**
+     * Собрать плоские данные организаций для формы restmancard/organizations.
+     *
+     * @param   array  $branch
+     * @param   array  $orgs
+     * @param   string $parent_name
+     */
+    protected function _collect_orgs(array $branch, array & $orgs, $parent_name)
+    {
+        foreach ($branch as $node)
+        {
+            $orgs[$node['UID']] = array(
+                'uid'            => $node['UID'],
+                'id'             => (int) $node['ID'],
+                'divcode'        => $node['DIVCODE'],
+                'name'           => $node['NAME'],
+                'parent'         => $node['PARENT'],
+                'parent_name'    => (string) $parent_name,
+                'flag'           => (int) $node['FLAG'],
+                'created_at'     => $this->_format_date($node['CREATED_AT']),
+                'updated_at'     => $this->_format_date($node['UPDATED_AT']),
+                'path'           => $node['PATH'],
+                'level'          => (int) $node['LEVEL'],
+                'children_count' => (int) $node['CHILDREN_COUNT'],
+                'total_children' => (int) $node['TOTAL_CHILDREN'],
+            );
+
+            $this->_collect_orgs($node['CHILDREN'], $orgs, $node['NAME']);
         }
     }
 
