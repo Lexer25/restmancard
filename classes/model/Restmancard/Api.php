@@ -9,7 +9,7 @@
  * Клиент умеет:
  *  - получать и кешировать JWT (файловый кеш Kohana);
  *  - выполнять GET-запросы с query-параметрами;
- *  - выполнять POST, PATCH и DELETE с JSON-телом;
+ *  - выполнять POST, PUT, PATCH и DELETE с JSON-телом;
  *  - повторять запрос один раз после 401 (перелогин);
  *  - кешировать произвольные результаты через remember().
  */
@@ -76,6 +76,24 @@ class Model_Restmancard_Api extends Model
     public function post($path, array $body, array $query = array())
     {
         return $this->_request('POST', $path, $query, $body);
+    }
+
+    /**
+     * PUT-запрос к API.
+     *
+     * Используется методами полной замены изменяемых полей:
+     *   PUT /api/v2/organizations/{divcode}              — name, parent, flag;
+     *   PUT /api/v2/organizations/{divcode}/accessnames  — accessnames.
+     *
+     * @param   string  $path
+     * @param   array   $body
+     * @param   array   $query
+     * @return  mixed   декодированный JSON (array|int) или NULL
+     * @throws  Kohana_Exception
+     */
+    public function put($path, array $body, array $query = array())
+    {
+        return $this->_request('PUT', $path, $query, $body);
     }
 
     /**

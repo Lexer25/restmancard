@@ -8,6 +8,9 @@
  *       -> {context: [{id_accessname, name}], pageCount, ...}
  *   GET /api/v2/organizations/{divcode}/accessnames
  *       -> [id_accessname, ...]
+ *   PUT /api/v2/organizations/{divcode}/accessnames
+ *       <- {accessnames: [id_accessname, ...]}
+ *       -> [id_accessname, ...]   (полная замена связей в SS_ACCESSORG)
  *   GET /api/v2/Access/GetPeople?id_accessname=...&pageIndex=0&pageSize=1000
  *       -> {context: [{tabnum}], pageCount, ...}
  *
@@ -175,6 +178,55 @@ class Model_Restmancard_Access extends Model
             'ids'   => $this->_normalize_ids($response),
             'error' => NULL,
         );
+    }
+
+    /**
+     * Сохранить набор категорий доступа организации.
+     *
+     * PUT /api/v2/organizations/{divcode}/accessnames заменяет набор целиком:
+     * недостающие связи добавляются, лишние удаляются, пустой массив очищает
+     * набор. Дубликаты API игнорирует, но они отсеиваются и здесь.
+     *
+     * Метод намеренно выбрасывает исключение: контроллеру нужен HTTP-статус
+     * (404 — нет организации, 422 — в наборе неизвестная категория, 403 — нет
+     * прав), чтобы показать причину пользователю.
+     *
+     * @param   string  $divcode
+     * @param   array   $ids  идентификаторы ACCESSNAME.ID_ACCESSNAME
+     * @return  array   сохранённый набор (нормализованные целые ID)
+     * @throws  Kohana_Exception
+     */
+    public function saveOrganizationAccess($divcode, array $ids)
+    {
+        $divcode = trim((string) $divcode);
+
+        if ($divcode === '')
+        {
+            throw new Kohana_Exception('Не указан код организации (divcode)');
+        }
+
+        $normalized = array();
+
+        foreach ($ids as $id)
+        {
+            if ($id === NULL OR is_bool($id) OR ! is_numeric($id))
+            {
+                continue;
+            }
+
+            $id = (int) $id;
+            $normalized[$id] = $id;
+        }
+
+        $normalized = array_values($normalized);
+        sort($normalized, SORT_NUMERIC);
+
+        $response = $this->_api->put(
+            '/api/v2/organizations/' . rawurlencode($divcode) . '/accessnames',
+            array('accessnames' => $normalized)
+        );
+
+        return $this->_normalize_ids($response);
     }
 
     /**

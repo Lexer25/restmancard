@@ -17,6 +17,7 @@
  * @var array  $parent_options
  * @var array  $org_options
  * @var string $add_url
+ * @var string $edit_url
  * @var string $delete_url
  * @var string $add_person_url
  * @var string $delete_person_url
@@ -27,9 +28,10 @@
  * @var string|NULL $access_error
  * @var bool   $access_truncated
  * @var string $access_url
+ * @var string $save_access_url
  */
 ?>
-<?php echo HTML::style('static/css/restmancard.css?v=1.8.0'); ?>
+<?php echo HTML::style('static/css/restmancard.css?v=1.9.0'); ?>
 
 <div class="panel panel-primary rc-root">
     <div class="panel-heading">
@@ -248,7 +250,11 @@
                         <h4 class="panel-title">
                             <span class="glyphicon glyphicon-lock"></span>
                             <?php echo __('Категории доступа'); ?>
-                            <span class="pull-right">
+                            <span class="pull-right rc-access-head">
+                                <button type="button" class="btn btn-xs btn-primary rc-access-edit-btn" id="rc-access-edit"
+                                        title="<?php echo __('Изменить набор категорий доступа организации'); ?>" disabled>
+                                    <span class="glyphicon glyphicon-pencil"></span> <?php echo __('Изменить'); ?>
+                                </button>
                                 <span class="badge rc-access-count" id="rc-access-count"
                                       title="<?php echo __('Выдано выбранному элементу / всего категорий'); ?>">0 / <?php echo count($access_categories); ?></span>
                             </span>
@@ -301,6 +307,22 @@
                     </div>
 
                     <div class="panel-footer">
+                        <div class="rc-access-editbar" id="rc-access-editbar" style="display: none;">
+                            <div class="rc-access-edithint">
+                                <span class="glyphicon glyphicon-info-sign"></span>
+                                <?php echo __('Кликните категорию, чтобы выдать или снять её. Набор заменяется целиком: невыбранные категории будут сняты.'); ?>
+                            </div>
+                            <div class="rc-access-editactions">
+                                <button type="button" class="btn btn-xs btn-success" id="rc-access-save">
+                                    <span class="glyphicon glyphicon-floppy-disk"></span> <?php echo __('Сохранить набор'); ?>
+                                </button>
+                                <button type="button" class="btn btn-xs btn-default" id="rc-access-cancel">
+                                    <?php echo __('Отмена'); ?>
+                                </button>
+                                <span class="text-muted rc-access-editcount" id="rc-access-edit-count"></span>
+                            </div>
+                        </div>
+
                         <small class="text-muted rc-access-legend">
                             <span class="label label-primary"><?php echo __('организация'); ?></span>
                             <?php echo __('— категория выдана организации'); ?>
@@ -404,6 +426,74 @@
                     <button type="submit" class="btn btn-primary" id="rc-add-org-save">
                         <span class="glyphicon glyphicon-floppy-disk"></span>
                         <span id="rc-add-org-save-text"><?php echo __('Сохранить'); ?></span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ===== Модальное окно: свойства организации ===== -->
+<div class="modal fade" id="rc-edit-org-modal" tabindex="-1" role="dialog" aria-labelledby="rc-edit-org-title">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <form id="rc-edit-org-form" autocomplete="off">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-label="<?php echo __('Закрыть'); ?>">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                    <h4 class="modal-title" id="rc-edit-org-title">
+                        <span class="glyphicon glyphicon-pencil"></span>
+                        <?php echo __('Свойства организации'); ?>
+                    </h4>
+                </div>
+
+                <div class="modal-body">
+                    <div id="rc-edit-org-alert" class="alert" style="display: none;">
+                        <span class="glyphicon glyphicon-warning-sign"></span>
+                        <span id="rc-edit-org-alert-text"></span>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="rc-edit-org-name">
+                            <?php echo __('Название организации'); ?> <span class="text-danger">*</span>
+                        </label>
+                        <input type="text" class="form-control" id="rc-edit-org-name" name="name"
+                               maxlength="50" placeholder="<?php echo __('Например: Отдел продаж'); ?>">
+                        <p class="help-block"><?php echo __('От 1 до 50 символов.'); ?></p>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="rc-edit-org-divcode"><?php echo __('Код организации (divcode)'); ?></label>
+                        <input type="text" class="form-control" id="rc-edit-org-divcode" name="divcode"
+                               readonly disabled>
+                        <p class="help-block"><?php echo __('Код неизменяем: REST API отклоняет его изменение.'); ?></p>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="rc-edit-org-parent"><?php echo __('Родительская организация'); ?></label>
+                        <select class="form-control" id="rc-edit-org-parent" name="parent">
+                            <option value=""><?php echo __('— Корневая организация —'); ?></option>
+                        </select>
+                        <p class="help-block">
+                            <?php echo __('Пусто — организация станет корневой. Саму организацию и её подразделения выбрать нельзя.'); ?>
+                        </p>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="rc-edit-org-flag"><?php echo __('Флаг'); ?></label>
+                        <select class="form-control" id="rc-edit-org-flag" name="flag">
+                            <option value="0"><?php echo __('0 — обычная'); ?></option>
+                            <option value="1"><?php echo __('1 — гостевая'); ?></option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo __('Отмена'); ?></button>
+                    <button type="submit" class="btn btn-primary" id="rc-edit-org-save">
+                        <span class="glyphicon glyphicon-floppy-disk"></span>
+                        <span id="rc-edit-org-save-text"><?php echo __('Сохранить'); ?></span>
                     </button>
                 </div>
             </form>
@@ -613,6 +703,22 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
     var selectedPersonUid = null;
     var accessRequest = 0;
     var accessNameMap = null;
+
+    // Панель «Категории доступа»: редактирование набора организации
+    var $accessEditBtn    = $('#rc-access-edit');
+    var $accessEditBar    = $('#rc-access-editbar');
+    var $accessSaveBtn    = $('#rc-access-save');
+    var $accessCancelBtn  = $('#rc-access-cancel');
+    var $accessEditCount  = $('#rc-access-edit-count');
+    var saveAccessUrl     = <?php echo json_encode($save_access_url); ?>;
+    var accessEditing     = false;
+    var accessEditDivcode = '';
+    var accessDraft       = {};
+    var accessSaveBusy    = false;
+    var accessAssignedIds = [];
+    var accessUnknownIds  = [];
+    var accessLastType    = '';
+    var accessLastResponse = null;
 
     // ===== Вспомогательные функции =====
 
@@ -828,10 +934,20 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
 
     function clearAccessState() {
         clearAccessMarks();
+        accessLastType = '';
+        accessLastResponse = null;
+        accessAssignedIds = [];
+        accessUnknownIds = [];
+        accessEditDivcode = '';
+        exitAccessEdit(false);
+        updateAccessEditButton();
         accessSummary('text-muted', esc(<?php echo json_encode(__('Выберите организацию или сотрудника, чтобы увидеть выданные категории.')); ?>));
     }
 
-    function applyAccessState(type, response) {
+    // Отрисовка набора по ответу API. Отделена от applyAccessState(), чтобы
+    // отмена редактирования могла вернуть прежнюю подсветку, не трогая
+    // состояние выбранной организации.
+    function renderAccessState(type, response) {
         var assigned = accessIdSet(response.assigned);
         var orgAssigned = accessIdSet(response.org_assigned);
         // Для организации её набор приходит в assigned, для сотрудника —
@@ -933,10 +1049,40 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
         }
     }
 
+    // Состояние выбранной организации/сотрудника по ответу AJAX.
+    function applyAccessState(type, response) {
+        accessLastType = type;
+        accessLastResponse = response;
+        accessUnknownIds = [];
+
+        if (type === 'org') {
+            accessAssignedIds = accessIdsFromSet(response.assigned);
+            accessEditDivcode = String(response.divcode || accessEditDivcode || '');
+
+            // Выданные категории, которых нет в справочнике: при сохранении
+            // набора они будут сняты, о чём панель предупреждает.
+            for (var i = 0; i < accessAssignedIds.length; i++) {
+                if ($accessList.find('.rc-access-item[data-access-id="' + accessAssignedIds[i] + '"]').length === 0) {
+                    accessUnknownIds.push(accessAssignedIds[i]);
+                }
+            }
+        } else {
+            accessAssignedIds = [];
+            accessEditDivcode = '';
+        }
+
+        renderAccessState(type, response);
+        updateAccessEditButton();
+    }
+
     function loadAccess(type, params) {
         if (!accessUrl || !$accessList.length) {
             return;
         }
+
+        // Смена выбранного элемента отменяет незавершённое редактирование:
+        // набор в панели будет перечитан для нового элемента.
+        exitAccessEdit(false);
 
         var seq = ++accessRequest;
         var data = $.extend({ type: type }, params || {});
@@ -985,6 +1131,192 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
         });
     }
 
+    // ===== Редактирование набора категорий доступа организации =====
+    // Кнопка «Изменить» активна только при выбранной организации: клик по
+    // категории выдаёт или снимает её, «Сохранить набор» отправляет полный
+    // набор в restmancard/save_access (PUT .../accessnames).
+
+    function updateAccessEditButton() {
+        var enabled = (accessEditDivcode !== '' && $accessList.length > 0 && !accessEditing);
+        var title;
+
+        if (accessEditing) {
+            title = <?php echo json_encode(__('Сохраните или отмените изменения набора')); ?>;
+        } else if (!$accessList.length) {
+            title = <?php echo json_encode(__('Справочник категорий доступа недоступен')); ?>;
+        } else if (accessEditDivcode === '') {
+            title = <?php echo json_encode(__('Выберите организацию: набор категорий сотрудника здесь не меняется')); ?>;
+        } else {
+            title = <?php echo json_encode(__('Изменить набор категорий доступа организации')); ?>;
+        }
+
+        $accessEditBtn.prop('disabled', !enabled).attr('title', title);
+    }
+
+    function renderAccessDraft() {
+        var count = 0;
+
+        $accessList.find('.rc-access-item').each(function () {
+            var $item = $(this);
+            var id = String($item.attr('data-access-id'));
+            var checked = Object.prototype.hasOwnProperty.call(accessDraft, id);
+
+            $item.toggleClass('rc-access-checked', checked);
+
+            if (checked) {
+                count++;
+            }
+
+            $item.find('.rc-access-marks').html(
+                '<span class="glyphicon ' + (checked ? 'glyphicon-check text-success' : 'glyphicon-unchecked text-muted') + '"></span>'
+            );
+        });
+
+        $accessEditCount.text(<?php echo json_encode(__('выбрано')); ?> + ': ' + count);
+    }
+
+    function enterAccessEdit() {
+        if (accessEditing || accessEditDivcode === '') {
+            return;
+        }
+
+        accessEditing = true;
+        accessDraft = accessIdSet(accessAssignedIds);
+
+        $accessList.addClass('rc-access-editing');
+        $accessEditBar.show();
+
+        renderAccessDraft();
+        updateAccessEditButton();
+        hideAccessAlert();
+
+        if (accessUnknownIds.length) {
+            var unknown = [];
+            var max = 10;
+
+            for (var i = 0; i < accessUnknownIds.length && i < max; i++) {
+                unknown.push('#' + accessUnknownIds[i]);
+            }
+
+            var rest = accessUnknownIds.length - unknown.length;
+
+            showAccessAlert(
+                esc(<?php echo json_encode(__('В наборе есть категории, которых нет в справочнике')); ?>)
+                + ': ' + esc(unknown.join(', ') + (rest > 0 ? ' …' : '')) + '. '
+                + esc(<?php echo json_encode(__('При сохранении они будут сняты: справочник категорий неполный или устарел.')); ?>),
+                'warning'
+            );
+        }
+    }
+
+    // restore === false — не возвращать прежнюю подсветку (набор будет
+    // перечитан из API или уже перерисован).
+    function exitAccessEdit(restore) {
+        if (!accessEditing) {
+            return;
+        }
+
+        accessEditing = false;
+        accessDraft = {};
+
+        $accessList.removeClass('rc-access-editing');
+        $accessList.find('.rc-access-item').removeClass('rc-access-checked');
+        $accessEditBar.hide();
+        $accessSaveBtn.prop('disabled', false);
+
+        updateAccessEditButton();
+
+        if (restore !== false && accessLastResponse) {
+            renderAccessState(accessLastType, accessLastResponse);
+        }
+    }
+
+    function saveAccessDraft() {
+        if (!accessEditing || accessSaveBusy) {
+            return;
+        }
+
+        var ids = accessIdsFromSet(accessDraft);
+        var divcode = accessEditDivcode;
+
+        accessSaveBusy = true;
+        $accessSaveBtn.prop('disabled', true);
+        hideAccessAlert();
+
+        $.ajax({
+            url: saveAccessUrl,
+            type: 'POST',
+            data: { divcode: divcode, access: ids },
+            dataType: 'json'
+        }).done(function (response) {
+            accessSaveBusy = false;
+            $accessSaveBtn.prop('disabled', false);
+
+            if (!response || !response.success) {
+                showAccessAlert(esc((response && response.message)
+                    || <?php echo json_encode(__('Не удалось сохранить набор категорий доступа')); ?>), 'danger');
+                return;
+            }
+
+            var saved = accessIdsFromSet(response.assigned || ids);
+
+            exitAccessEdit(false);
+
+            applyAccessState('org', {
+                success: true,
+                type: 'org',
+                divcode: divcode,
+                assigned: saved,
+                org_assigned: [],
+                org_loaded: true,
+                warnings: []
+            });
+
+            showAccessAlert(esc(response.message || <?php echo json_encode(__('Набор категорий доступа сохранён')); ?>)
+                + ': <strong>' + saved.length + '</strong>', 'success');
+        }).fail(function (xhr) {
+            accessSaveBusy = false;
+            $accessSaveBtn.prop('disabled', false);
+
+            var message = <?php echo json_encode(__('Не удалось сохранить набор категорий доступа')); ?>;
+
+            if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                message = xhr.responseJSON.message;
+            } else if (xhr && xhr.status) {
+                message += ' (HTTP ' + xhr.status + ')';
+            }
+
+            showAccessAlert(esc(message), 'danger');
+        });
+    }
+
+    $accessEditBtn.on('click', enterAccessEdit);
+
+    $accessCancelBtn.on('click', function () {
+        exitAccessEdit(true);
+        hideAccessAlert();
+    });
+
+    $accessSaveBtn.on('click', saveAccessDraft);
+
+    $accessList.on('click', '.rc-access-item', function () {
+        if (!accessEditing) {
+            return;
+        }
+
+        var id = String($(this).attr('data-access-id'));
+
+        if (Object.prototype.hasOwnProperty.call(accessDraft, id)) {
+            delete accessDraft[id];
+        } else {
+            accessDraft[id] = true;
+        }
+
+        renderAccessDraft();
+    });
+
+    updateAccessEditButton();
+
     // ===== Панель «Свойства» =====
 
     function showOrg(uid) {
@@ -1031,8 +1363,13 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
                 + '</div>';
         }
 
-        // Действия с сотрудниками выбранной организации
+        // Действия с выбранной организацией
         html += '<div class="rc-props-actions">'
+            + '<button type="button" class="btn btn-sm btn-primary rc-props-edit-org"'
+            + ' data-divcode="' + esc(o.divcode) + '">'
+            + '<span class="glyphicon glyphicon-pencil"></span> '
+            + esc(<?php echo json_encode(__('Изменить свойства')); ?>)
+            + '</button>'
             + '<button type="button" class="btn btn-sm btn-success rc-props-add-person"'
             + ' data-id-org="' + o.id + '" data-divcode="' + esc(o.divcode) + '">'
             + '<span class="glyphicon glyphicon-user"></span> '
@@ -1049,6 +1386,9 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
         selectedPersonUid = null;
         updateDeleteButton();
 
+        accessEditDivcode = o.divcode || '';
+        updateAccessEditButton();
+
         loadAccess('org', { divcode: o.divcode });
     }
 
@@ -1056,6 +1396,10 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
         selectedOrgUid = null;
         selectedPersonUid = null;
         updateDeleteButton();
+
+        // Набор категорий меняется только у организации
+        accessEditDivcode = '';
+        updateAccessEditButton();
 
         var p = DATA.people[uid];
         if (!p) {
@@ -1095,6 +1439,264 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
             divcode: (p.org_known === false) ? '' : (p.org_divcode || '')
         });
     }
+
+    // ===== Редактирование свойств организации =====
+    // Меняются название, родительская организация и флаг. Код divcode
+    // неизменяем, поэтому выводится только для справки.
+
+    var $editModal    = $('#rc-edit-org-modal');
+    var $editForm     = $('#rc-edit-org-form');
+    var $editAlert    = $('#rc-edit-org-alert');
+    var $editAlertTxt = $('#rc-edit-org-alert-text');
+    var $editSave     = $('#rc-edit-org-save');
+    var $editSaveTxt  = $('#rc-edit-org-save-text');
+    var $editParent   = $('#rc-edit-org-parent');
+    var editUrl       = <?php echo json_encode($edit_url); ?>;
+    var editBusy      = false;
+    var editOrgCode   = '';
+
+    function showEditAlert(text, type) {
+        $editAlert
+            .removeClass('alert-danger alert-success alert-warning')
+            .addClass(type === 'success' ? 'alert-success' : 'alert-danger')
+            .show();
+        $editAlertTxt.text(text || '');
+    }
+
+    function hideEditAlert() {
+        $editAlert.removeClass('alert-danger alert-success alert-warning').hide();
+        $editAlertTxt.text('');
+    }
+
+    function clearEditErrors() {
+        $editForm.find('.form-group').removeClass('has-error');
+    }
+
+    function markEditField(field) {
+        $editForm.find('[name="' + field + '"]').closest('.form-group').addClass('has-error');
+    }
+
+    function showEditErrors(errors) {
+        if (!errors) {
+            return;
+        }
+
+        for (var field in errors) {
+            if (Object.prototype.hasOwnProperty.call(errors, field)) {
+                markEditField(field);
+            }
+        }
+    }
+
+    function setEditBusy(busy) {
+        editBusy = busy;
+        $editSave.prop('disabled', busy);
+        $editSaveTxt.text(busy ? '<?php echo __('Сохранение...'); ?>' : '<?php echo __('Сохранить'); ?>');
+    }
+
+    // Коды, которые нельзя выбрать родителем: сама организация и все её
+    // потомки (иначе в дереве получится кольцо). Сервер проверяет это ещё раз.
+    function forbiddenParentCodes(divcode) {
+        var result = {};
+        var needle = String(divcode || '').toLowerCase();
+
+        if (needle === '') {
+            return result;
+        }
+
+        result[needle] = true;
+
+        var children = {};
+
+        $.each(DATA.orgs, function (uid, org) {
+            if (!org || !org.divcode || !org.parent) {
+                return;
+            }
+
+            var parent = String(org.parent).toLowerCase();
+
+            if (!children[parent]) {
+                children[parent] = [];
+            }
+
+            children[parent].push(String(org.divcode));
+        });
+
+        var queue = children[needle] ? children[needle].slice() : [];
+        var guard = 0;
+
+        while (queue.length && guard < 10000) {
+            guard++;
+
+            var code = queue.shift();
+            var key = code.toLowerCase();
+
+            if (result[key]) {
+                continue;
+            }
+
+            result[key] = true;
+
+            if (children[key]) {
+                for (var i = 0; i < children[key].length; i++) {
+                    queue.push(children[key][i]);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    function fillEditParents(org) {
+        var forbidden = forbiddenParentCodes(org.divcode);
+        var list = [];
+        var parent = org.parent ? String(org.parent) : '';
+
+        $.each(DATA.orgs, function (uid, item) {
+            if (!item || !item.divcode) {
+                return;
+            }
+
+            if (forbidden[String(item.divcode).toLowerCase()]) {
+                return;
+            }
+
+            list.push(item);
+        });
+
+        list.sort(function (a, b) {
+            return String(a.path || a.name || '').localeCompare(String(b.path || b.name || ''));
+        });
+
+        var html = '<option value="">' + <?php echo json_encode(__('— Корневая организация —')); ?> + '</option>';
+        var hasParent = false;
+
+        for (var i = 0; i < list.length; i++) {
+            var code = String(list[i].divcode);
+
+            html += '<option value="' + esc(code) + '">'
+                + esc(list[i].path || list[i].name) + '</option>';
+
+            if (parent !== '' && code.toLowerCase() === parent.toLowerCase()) {
+                hasParent = true;
+            }
+        }
+
+        // Текущего родителя может не быть в загруженном дереве
+        if (parent !== '' && !hasParent) {
+            html += '<option value="' + esc(parent) + '">'
+                + esc(parent) + ' (' + <?php echo json_encode(__('нет в дереве')); ?> + ')</option>';
+        }
+
+        $editParent.html(html);
+    }
+
+    function openEditOrg(divcode) {
+        var org = findOrgByDivcode(divcode);
+
+        if (!org) {
+            return;
+        }
+
+        editOrgCode = String(org.divcode || '');
+
+        setEditBusy(false);
+        hideEditAlert();
+        clearEditErrors();
+
+        $('#rc-edit-org-name').val(org.name || '');
+        $('#rc-edit-org-divcode').val(org.divcode || '');
+        $('#rc-edit-org-flag').val(String(org.flag === 1 ? 1 : 0));
+
+        fillEditParents(org);
+        $editParent.val(org.parent ? String(org.parent) : '');
+
+        $editModal.modal('show');
+    }
+
+    function saveEditOrg() {
+        if (editBusy) {
+            return;
+        }
+
+        hideEditAlert();
+        clearEditErrors();
+
+        var name   = $.trim($('#rc-edit-org-name').val());
+        var parent = $editParent.val() || '';
+        var flag   = $('#rc-edit-org-flag').val();
+        var valid  = true;
+
+        if (name === '' || name.length > 50) {
+            markEditField('name');
+            valid = false;
+        }
+
+        if (!valid) {
+            showEditAlert('<?php echo __('Проверьте заполнение полей'); ?>', 'error');
+            return;
+        }
+
+        setEditBusy(true);
+
+        $.ajax({
+            url: editUrl,
+            type: 'POST',
+            data: {
+                divcode: editOrgCode,
+                name: name,
+                parent: parent,
+                flag: flag
+            },
+            dataType: 'json'
+        }).done(function (response) {
+            if (!response || !response.success) {
+                setEditBusy(false);
+                showEditErrors(response && response.errors);
+                showEditAlert((response && response.message)
+                    || '<?php echo __('Не удалось сохранить свойства организации'); ?>', 'error');
+                return;
+            }
+
+            var focus = (response && response.divcode) ? response.divcode : editOrgCode;
+
+            $editSaveTxt.text('<?php echo __('Готово'); ?>');
+            showEditAlert(response.message || '<?php echo __('Свойства организации сохранены'); ?>', 'success');
+
+            window.setTimeout(function () {
+                window.location.href = indexUrl + '?refresh=1&focus=' + encodeURIComponent(focus);
+            }, 700);
+        }).fail(function (xhr) {
+            setEditBusy(false);
+
+            var message = '<?php echo __('Не удалось сохранить свойства организации'); ?>';
+
+            if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                message = xhr.responseJSON.message;
+            } else if (xhr && xhr.status) {
+                message += ' (HTTP ' + xhr.status + ')';
+            }
+
+            showEditAlert(message, 'error');
+        });
+    }
+
+    $props.on('click', '.rc-props-edit-org', function () {
+        openEditOrg($(this).attr('data-divcode'));
+    });
+
+    $editForm.on('submit', function (event) {
+        event.preventDefault();
+        saveEditOrg();
+    });
+
+    $editModal.on('shown.bs.modal', function () {
+        $('#rc-edit-org-name').trigger('focus').trigger('select');
+    });
+
+    $editModal.on('hidden.bs.modal', function () {
+        setEditBusy(false);
+    });
 
     // ===== Дерево =====
 

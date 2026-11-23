@@ -6,6 +6,10 @@
  * Контракт:
  *   GET /api/v2/organizations?page=1&pageSize=100&sort=name
  *   GET /api/v2/organizations/{divcode}
+ *   POST /api/v2/organizations
+ *   PUT /api/v2/organizations/{divcode}                  — name, parent, flag
+ *   PUT /api/v2/organizations/{divcode}/accessnames      — набор категорий
+ *   DELETE /api/v2/organizations/{divcode}
  *
  * Список организаций отдаётся плоским (id, divcode, name, parent, flag,
  * createdAt, updatedAt), а parent — это divcode родителя. Дерево строится
@@ -510,6 +514,136 @@ class Model_Restmancard_Org extends Model
     }
 
     /**
+     * Проверить изменения существующей организации по контракту API.
+     *
+     * Меняются только name, parent и flag. Код divcode — неизменяемый: API
+     * отвечает 400 DIVCODE_IMMUTABLE, если он передан и не совпадает с путём,
+     * поэтому в теле запроса он не отправляется.
+     *
+     * @param   array  $data
+     * @return  array  ошибки в виде field => message; пустой массив — данные корректны
+     */
+    public function validateOrganizationUpdate(array $data)
+    {
+        $errors = array();
+
+        $divcode = trim((string) Arr::get($data, 'divcode', ''));
+        $name = trim((string) Arr::get($data, 'name', ''));
+        $parent = trim((string) Arr::get($data, 'parent', ''));
+        $flag = trim((string) Arr::get($data, 'flag', '0'));
+
+        if ($divcode === '')
+        {
+            $errors['divcode'] = 'Не указан код изменяемой организации';
+        }
+        elseif ($this->_length($divcode) > self::DIVCODE_MAX_LENGTH
+            OR ! preg_match('/^[A-Za-z0-9._-]+$/', $divcode))
+        {
+            $errors['divcode'] = 'Некорректный код организации';
+        }
+
+        if ($name === '')
+        {
+            $errors['name'] = 'Введите название организации';
+        }
+        elseif ($this->_length($name) > self::NAME_MAX_LENGTH)
+        {
+            $errors['name'] = 'Название организации не должно превышать ' . self::NAME_MAX_LENGTH . ' символов';
+        }
+
+        if ($flag !== '' AND $flag !== '0' AND $flag !== '1')
+        {
+            $errors['flag'] = 'Неверный флаг организации';
+        }
+
+        if ($parent !== '')
+        {
+            if ($this->_length($parent) > self::DIVCODE_MAX_LENGTH
+                OR ! preg_match('/^[A-Za-z0-9._-]+$/', $parent))
+            {
+                $errors['parent'] = 'Некорректный код родительской организации';
+            }
+            elseif ($divcode !== '' AND strcasecmp($parent, $divcode) === 0)
+            {
+                $errors['parent'] = 'Организация не может быть родителем самой себе';
+            }
+            elseif ($divcode !== '' AND $this->isDescendant($divcode, $parent))
+            {
+                $errors['parent'] = 'Нельзя выбрать потомка: в дереве получится кольцо';
+            }
+            elseif ( ! $this->_organizations_list_truncated()
+                AND $this->getOrganizationByDivcode($parent) === NULL)
+            {
+                // При обрезке списка (organizations.max_pages) «нет в списке»
+                // не значит «не существует»: вердикт оставляет API
+                // (422 PARENT_NOT_FOUND).
+                $errors['parent'] = 'Родительская организация не найдена';
+            }
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Изменить свойства организации через PUT /api/v2/organizations/{divcode}.
+     *
+     * Контракт PUT — полная замена изменяемых полей:
+     *   * name обязателен (1–50 символов после обрезки пробелов);
+     *   * отсутствие parent (или null) делает организацию корневой;
+     *   * отсутствие flag означает 0.
+     * Поэтому parent и flag отправляются всегда, divcode — никогда.
+     *
+     * @param   string  $divcode
+     * @param   array   $data  name, parent, flag
+     * @return  array   организация во внутреннем виде
+     * @throws  Kohana_Exception
+     */
+    public function updateOrganization($divcode, array $data)
+    {
+        $divcode = trim((string) $divcode);
+
+        if ($divcode === '')
+        {
+            throw new Kohana_Exception('Не указан код организации для изменения');
+        }
+
+        $name = trim((string) Arr::get($data, 'name', ''));
+        $parent = trim((string) Arr::get($data, 'parent', ''));
+        $flag = ((int) Arr::get($data, 'flag', 0) === 1) ? 1 : 0;
+
+        $payload = array(
+            'name' => $name,
+            'flag' => $flag,
+        );
+
+        // null и отсутствие поля для API равнозначны — корневая организация
+        if ($parent !== '')
+        {
+            $payload['parent'] = $parent;
+        }
+
+        $response = $this->_api->put(
+            '/api/v2/organizations/' . rawurlencode($divcode),
+            $payload
+        );
+
+        // Список организаций закеширован — после изменения перечитываем его,
+        // иначе дерево покажет старые название, родителя и флаг.
+        $this->_api->forget(Model_Restmancard_Api::CACHE_PREFIX . 'orgs_v2');
+        $this->_stats = array();
+
+        $organization = $this->_normalize_organization(is_array($response) ? $response : array());
+
+        // Ответ без тела не должен «терять» код изменённой организации
+        if ($organization['DIVCODE'] === '')
+        {
+            $organization['DIVCODE'] = $divcode;
+        }
+
+        return $organization;
+    }
+
+    /**
      * Удалить организацию через DELETE /api/v2/organizations/{divcode}.
      *
      * REST API v2 удаляет только пустую организацию: если у неё есть дочерние
@@ -585,6 +719,129 @@ class Model_Restmancard_Org extends Model
         }
 
         return NULL;
+    }
+
+    /**
+     * Организация по коду divcode (сравнение без учёта регистра).
+     *
+     * @param   string  $divcode
+     * @return  array|NULL
+     */
+    public function getOrganizationByDivcode($divcode)
+    {
+        $needle = $this->_lower(trim((string) $divcode));
+
+        if ($needle === '')
+        {
+            return NULL;
+        }
+
+        foreach ($this->getAllOrganizations() as $org)
+        {
+            if ($this->_lower($org['DIVCODE']) === $needle)
+            {
+                return $org;
+            }
+        }
+
+        return NULL;
+    }
+
+    /**
+     * Коды всех потомков организации (без учёта регистра divcode).
+     *
+     * Нужны форме редактирования: родителем нельзя сделать саму организацию
+     * или её потомка — иначе в дереве получится кольцо. REST API v2 такую
+     * попытку отклоняет (409 CYCLE), но проверка до запроса даёт понятную
+     * ошибку у поля «Родительская организация».
+     *
+     * @param   string  $divcode
+     * @return  array   коды потомков в исходном написании
+     */
+    public function descendantDivcodes($divcode)
+    {
+        $start = $this->_lower(trim((string) $divcode));
+
+        if ($start === '')
+        {
+            return array();
+        }
+
+        // Родитель -> дети; ключи нормализованы, значения — исходные коды
+        $children = array();
+
+        foreach ($this->getAllOrganizations() as $org)
+        {
+            $code = trim((string) $org['DIVCODE']);
+            $parent = $org['PARENT'];
+
+            if ($code === '' OR $parent === NULL)
+            {
+                continue;
+            }
+
+            $parent = trim((string) $parent);
+
+            if ($parent === '')
+            {
+                continue;
+            }
+
+            $children[$this->_lower($parent)][] = $code;
+        }
+
+        $found = array();
+        $queue = isset($children[$start]) ? $children[$start] : array();
+
+        while ( ! empty($queue))
+        {
+            $code = array_shift($queue);
+            $key = $this->_lower($code);
+
+            if (isset($found[$key]))
+            {
+                continue;
+            }
+
+            $found[$key] = $code;
+
+            if (isset($children[$key]))
+            {
+                foreach ($children[$key] as $child)
+                {
+                    $queue[] = $child;
+                }
+            }
+        }
+
+        return array_values($found);
+    }
+
+    /**
+     * Код является потомком организации?
+     *
+     * @param   string  $divcode
+     * @param   string  $candidate
+     * @return  bool
+     */
+    public function isDescendant($divcode, $candidate)
+    {
+        $needle = $this->_lower(trim((string) $candidate));
+
+        if ($needle === '')
+        {
+            return FALSE;
+        }
+
+        foreach ($this->descendantDivcodes($divcode) as $code)
+        {
+            if ($this->_lower($code) === $needle)
+            {
+                return TRUE;
+            }
+        }
+
+        return FALSE;
     }
 
     /**
@@ -1166,6 +1423,27 @@ class Model_Restmancard_Org extends Model
         }
 
         return count($nodes) >= ($max_pages * $page_size);
+    }
+
+    /**
+     * Список организаций мог быть обрезан настройкой max_pages?
+     *
+     * Нужен проверке родителя: при обрезке «нет в списке» не значит
+     * «не существует», поэтому вердикт остаётся за API.
+     *
+     * @return  bool
+     */
+    protected function _organizations_list_truncated()
+    {
+        $max_pages = (int) $this->_config['max_pages'];
+        $page_size = (int) $this->_config['page_size'];
+
+        if ($max_pages < 1 OR $page_size < 1)
+        {
+            return FALSE;
+        }
+
+        return count($this->getAllOrganizations()) >= ($max_pages * $page_size);
     }
 
     /**

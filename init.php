@@ -1,6 +1,6 @@
 <?php defined('SYSPATH') or die('No direct script access.');
 
-defined('RESTMANCARD_VERSION') OR define('RESTMANCARD_VERSION', '1.8.0');
+defined('RESTMANCARD_VERSION') OR define('RESTMANCARD_VERSION', '1.9.0');
 
 Kohana::$config->load('menu')
     ->set('restmancard', array(
