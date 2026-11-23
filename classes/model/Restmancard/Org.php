@@ -902,17 +902,18 @@ class Model_Restmancard_Org extends Model
     /**
      * Дерево организаций с сотрудниками и счётчиками.
      *
-     * @param   string  $focus_code  divcode организации, которую нужно раскрыть
+     * @param   string  $focus_code       divcode организации, которую нужно раскрыть
+     * @param   boolean $with_identifiers  читать идентификаторы (карты) сотрудников
      * @return  array
      */
-    public function getTree($focus_code = NULL)
+    public function getTree($focus_code = NULL, $with_identifiers = TRUE)
     {
         $this->_warnings = array();
         $this->_node_counter = 0;
 
         $flat = $this->getAllOrganizations();
 
-        $people_bundle = $this->_load_people();
+        $people_bundle = $this->_load_people($with_identifiers);
         $people = (isset($people_bundle['people']) AND is_array($people_bundle['people']))
             ? $people_bundle['people']
             : array();
@@ -1075,6 +1076,21 @@ class Model_Restmancard_Org extends Model
         );
 
         return $tree;
+    }
+
+    /**
+     * Дерево организаций с сотрудниками, но без идентификаторов (карт).
+     *
+     * Отдельная форма `restmancard/people` работает только с сотрудниками,
+     * поэтому GET /api/v2/Identifier/GetList не запрашивается: дерево строится
+     * теми же узлами, что и getTree(), но карточки сотрудников остаются пустыми.
+     *
+     * @param   string  $focus_code  divcode организации, ветку которой нужно раскрыть
+     * @return  array
+     */
+    public function getPeopleTree($focus_code = NULL)
+    {
+        return $this->getTree($focus_code, FALSE);
     }
 
     /**
@@ -1256,13 +1272,16 @@ class Model_Restmancard_Org extends Model
     /**
      * Загрузить сотрудников, не прерывая построение дерева при ошибке.
      *
+     * @param   boolean  $with_identifiers  читать ли идентификаторы (карты)
      * @return  array
      */
-    protected function _load_people()
+    protected function _load_people($with_identifiers = TRUE)
     {
         try
         {
-            $bundle = $this->_people()->getAllWithIdentifiers();
+            $bundle = $with_identifiers
+                ? $this->_people()->getAllWithIdentifiers()
+                : $this->_load_people_plain();
         }
         catch (Exception $e)
         {
@@ -1283,6 +1302,25 @@ class Model_Restmancard_Org extends Model
         }
 
         return $bundle;
+    }
+
+    /**
+     * Сотрудники без идентификаторов: для формы «Сотрудники».
+     *
+     * @return  array
+     * @throws  Kohana_Exception
+     */
+    protected function _load_people_plain()
+    {
+        $bundle = $this->_people()->getAll();
+
+        return array(
+            'people'                => $bundle['people'],
+            'people_truncated'      => ! empty($bundle['truncated']),
+            'identifiers_loaded'    => 0,
+            'identifiers_truncated' => FALSE,
+            'identifiers_error'     => NULL,
+        );
     }
 
     /**

@@ -1,6 +1,6 @@
 <?php defined('SYSPATH') or die('No direct script access.');
 
-defined('RESTMANCARD_VERSION') OR define('RESTMANCARD_VERSION', '2.0.0');
+defined('RESTMANCARD_VERSION') OR define('RESTMANCARD_VERSION', '2.1.0');
 
 Kohana::$config->load('menu')
     ->set('restmancard', array(
@@ -19,5 +19,17 @@ Kohana::$config->load('menu')
         'url' => 'restmancard/organizations',
         'icon' => 'fa-building',
         'order' => 27,
+        'disabled' => false,
+    ));
+
+// Отдельная форма только для сотрудников (пиплов): ФИО, организация
+// (родительская ссылка) и набор категорий доступа, без управления
+// организациями.
+Kohana::$config->load('menu')
+    ->set('restmancard_people', array(
+        'title' => 'Сотрудники',
+        'url' => 'restmancard/people',
+        'icon' => 'fa-users',
+        'order' => 28,
         'disabled' => false,
     ));

@@ -341,6 +341,514 @@ class Controller_Restmancard extends Controller_Template
     }
 
     /**
+     * Отдельная форма для работы с сотрудниками (пункт меню «Сотрудники»).
+     *
+     * Форма повторяет компоновку restmancard/organizations, но работает
+     * с сотрудниками, а организации показаны только как группы дерева:
+     * добавлять, изменять и удалять организации здесь нельзя.
+     *
+     *  1) дерево организаций с сотрудниками (без карт и без кнопок
+     *     управления организациями);
+     *  2) свойства сотрудника: ФИО и организация (родительская ссылка);
+     *  3) набор категорий доступа сотрудника.
+     *
+     * «Сохранить» панели свойств вызывает restmancard/save_person:
+     * PUT /api/v2/Person (ФИО) и, если организация изменена,
+     * PATCH /api/v2/Person (id_org). «Сохранить» панели категорий вызывает
+     * restmancard/save_person_access → PUT /api/v2/Person/Access.
+     *
+     * @return  void
+     */
+    public function action_people()
+    {
+        $this->set_title('Сотрудники (REST)');
+
+        $refresh = (bool) $this->request->query('refresh');
+        $focus_divcode = trim((string) $this->request->query('focus'));
+        $focus_person = trim((string) $this->request->query('person'));
+
+        if ($refresh)
+        {
+            $this->_api()->flush();
+        }
+
+        $error = NULL;
+        $warnings = array();
+        $tree = array();
+        $org_model = $this->_org();
+
+        $stats = array(
+            'organizations'      => 0,
+            'people'             => 0,
+            'people_truncated'   => FALSE,
+            'people_root'        => '',
+            'people_mapped'      => 0,
+            'people_unmapped'    => 0,
+            'people_map_enabled' => FALSE,
+            'roots'              => 0,
+        );
+
+        try
+        {
+            $tree = $org_model->getPeopleTree($focus_divcode);
+            $warnings = $org_model->getWarnings();
+
+            $model_stats = $org_model->getStats();
+            if (is_array($model_stats) AND ! empty($model_stats))
+            {
+                $stats = array_merge($stats, $model_stats);
+            }
+        }
+        catch (Exception $e)
+        {
+            $error = $e->getMessage();
+
+            Kohana::$log->add(Log::ERROR, 'restmancard: не удалось получить сотрудников: :message (файл :file, строка :line)' . PHP_EOL . $e->getTraceAsString(), array(
+                ':message' => $e->getMessage(),
+                ':file'    => $e->getFile(),
+                ':line'    => $e->getLine(),
+            ));
+        }
+
+        // Справочник категорий доступа: без него форма работает только
+        // с ФИО и организацией, а сохранение набора отключается.
+        $access_model = $this->_access();
+        $access_bundle = $access_model->getCategories();
+        $access_categories = $access_bundle['categories'];
+        $access_error = $access_bundle['error'];
+        $access_truncated = ! empty($access_bundle['truncated']);
+
+        if ($access_error !== NULL)
+        {
+            $warnings[] = 'Не удалось загрузить категории доступа: ' . $access_error;
+        }
+
+        // Плоские данные для формы: сотрудники (с их организацией) и список
+        // организаций для выбора.
+        $people = array();
+        $orgs = array();
+        $this->_collect_people($tree, $people);
+        $this->_collect_orgs($tree, $orgs, '');
+
+        $data = array(
+            'people' => $people,
+            'orgs'   => $orgs,
+            'meta'   => array(
+                'focus'  => $focus_divcode,
+                'person' => $focus_person,
+            ),
+        );
+
+        $flags = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
+        $data_json = json_encode($data, $flags);
+
+        if ($data_json === FALSE)
+        {
+            $data_json = json_encode($data);
+        }
+
+        if ($data_json === FALSE)
+        {
+            $data_json = '{"people":{},"orgs":{},"meta":{"focus":"","person":""}}';
+        }
+
+        $api_config = Kohana::$config->load('restmancard.api');
+        $api_url = is_array($api_config) ? (string) $api_config['base_url'] : '';
+
+        $refresh_query = array('refresh' => 1);
+
+        if ($focus_divcode !== '')
+        {
+            $refresh_query['focus'] = $focus_divcode;
+        }
+
+        if ($focus_person !== '')
+        {
+            $refresh_query['person'] = $focus_person;
+        }
+
+        $content = View::factory('restmancard/people', array(
+            'tree'              => $tree,
+            'error'             => $error,
+            'warnings'          => $warnings,
+            'stats'             => $stats,
+            'data_json'         => $data_json,
+            'api_url'           => $api_url,
+            'generated_at'      => date('d.m.Y H:i:s'),
+            'refresh_url'       => URL::site('restmancard/people') . '?' . http_build_query($refresh_query),
+            'save_person_url'   => URL::site('restmancard/save_person'),
+            'save_access_url'   => URL::site('restmancard/save_person_access'),
+            'access_url'        => URL::site('restmancard/access'),
+            'focus_divcode'     => $focus_divcode,
+            'focus_person'      => $focus_person,
+            'access_categories' => $access_categories,
+            'access_error'      => $access_error,
+            'access_truncated'  => $access_truncated,
+            'access_editable'   => ($access_error === NULL AND ! empty($access_categories)),
+        ));
+
+        $this->template->content = $content;
+    }
+
+    /**
+     * AJAX: сохранить свойства сотрудника — ФИО и организацию.
+     *
+     * ФИО сохраняется через PUT /api/v2/Person (замена ФИО целиком:
+     * фамилия обязательна, имя и отчество могут быть пустыми).
+     *
+     * Организация (родительская ссылка) сохраняется через
+     * PATCH /api/v2/Person с id_org и только когда форма передала id_org:
+     * если пользователь не менял список, запрос не отправляется и лишняя
+     * запись в журнал PEOPLE не создаётся.
+     *
+     * @return  void
+     */
+    public function action_save_person()
+    {
+        $this->auto_render = FALSE;
+
+        if ($this->request->method() !== 'POST')
+        {
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => 'Метод не поддерживается',
+            ), 405);
+            return;
+        }
+
+        $post = $this->request->post();
+        $tabnum = trim((string) Arr::get($post, 'tabnum', ''));
+        $people_model = $this->_people();
+        $org_model = $this->_org();
+
+        $errors = $people_model->validatePersonUpdate($post);
+
+        $id_org = (int) Arr::get($post, 'id_org', 0);
+        $organization = NULL;
+
+        if ($id_org > 0)
+        {
+            $organization = $org_model->getOrganizationById($id_org);
+
+            if ($organization === NULL)
+            {
+                $errors['id_org'] = 'Выберите организацию сотрудника';
+            }
+        }
+
+        if ( ! empty($errors))
+        {
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => reset($errors),
+                'errors'  => $errors,
+                'tabnum'  => $tabnum,
+            ));
+            return;
+        }
+
+        $names_saved = FALSE;
+        $person = NULL;
+
+        try
+        {
+            // Сначала ФИО: это основное действие панели свойств.
+            $person = $people_model->updatePerson($tabnum, $post);
+            $names_saved = TRUE;
+
+            $message = 'ФИО сотрудника сохранено';
+
+            if ($organization !== NULL)
+            {
+                $updated = $people_model->assignToOrganization($tabnum, $id_org);
+
+                if ($updated === 0)
+                {
+                    throw new Kohana_Exception(
+                        'REST API не подтвердил смену организации сотрудника (id_org = :id)',
+                        array(':id' => $id_org)
+                    );
+                }
+
+                $message = 'Свойства сотрудника сохранены';
+            }
+
+            $this->_json(array(
+                'success'      => TRUE,
+                'message'      => $message,
+                'tabnum'       => (string) $person['TABNUM'],
+                'full_name'    => (string) $person['FULL_NAME'],
+                'names_saved'  => TRUE,
+                'person'       => array(
+                    'tabnum'     => (string) $person['TABNUM'],
+                    'surname'    => (string) $person['SURNAME'],
+                    'name'       => (string) $person['NAME'],
+                    'patronymic' => (string) $person['PATRONYMIC'],
+                    'full_name'  => (string) $person['FULL_NAME'],
+                ),
+                'organization' => ($organization === NULL) ? NULL : array(
+                    'id'      => (int) $organization['ID'],
+                    'divcode' => (string) $organization['DIVCODE'],
+                    'name'    => (string) $organization['NAME'],
+                ),
+            ));
+        }
+        catch (Exception $e)
+        {
+            Kohana::$log->add(Log::ERROR, 'restmancard: не удалось сохранить сотрудника :tabnum: :message' . PHP_EOL . $e->getTraceAsString(), array(
+                ':tabnum'  => $tabnum,
+                ':message' => $e->getMessage(),
+            ));
+
+            $result = $this->_save_person_failure($e, $tabnum);
+
+            // ФИО уже записано, а организация не сменилась: пользователь
+            // должен знать, что часть изменений сохранена.
+            if ($names_saved AND $id_org > 0)
+            {
+                $result['names_saved'] = TRUE;
+                $result['message'] = rtrim($result['message'], '.') . '. ФИО при этом сохранено.';
+            }
+
+            $this->_json($result);
+        }
+    }
+
+    /**
+     * Ответ на ошибку сохранения сотрудника.
+     *
+     * @param   Exception  $e
+     * @param   string     $tabnum
+     * @return  array
+     */
+    protected function _save_person_failure(Exception $e, $tabnum)
+    {
+        $result = array(
+            'success' => FALSE,
+            'message' => $e->getMessage(),
+            'tabnum'  => $tabnum,
+        );
+
+        $status = $this->_api_status($e);
+        $reason = $this->_api_reason();
+
+        if ($status > 0)
+        {
+            $result['status'] = $status;
+        }
+
+        if ($reason !== '')
+        {
+            $result['reason'] = $reason;
+        }
+
+        if ($status === 404)
+        {
+            $result['message'] = 'Сотрудник не найден — возможно, он уже удалён. Обновите страницу.';
+        }
+        elseif ($status === 403)
+        {
+            $result['message'] = 'Недостаточно прав для изменения сотрудника.';
+        }
+        elseif ($status === 409)
+        {
+            $api_message = $this->_api_message();
+
+            $result['message'] = ($api_message !== '')
+                ? $api_message
+                : 'REST API отклонил изменение сотрудника.';
+        }
+        elseif ($status === 422 OR $status === 400)
+        {
+            $api_message = $this->_api_message();
+
+            $result['message'] = ($api_message !== '')
+                ? $api_message
+                : 'REST API отклонил изменение сотрудника: проверьте ФИО и организацию.';
+
+            $field_errors = $this->_api_field_errors();
+
+            if ( ! empty($field_errors))
+            {
+                $result['errors'] = $field_errors;
+            }
+        }
+        elseif ($status === 0)
+        {
+            $result['message'] = 'REST API недоступен. Проверьте, что сервис запущен.';
+        }
+
+        return $result;
+    }
+
+    /**
+     * AJAX: сохранить набор категорий доступа сотрудника через
+     * PUT /api/v2/Person/Access.
+     *
+     * Набор заменяется целиком: переданные категории выдаются, отсутствующие
+     * снимаются, пустой массив очищает набор.
+     *
+     * @return  void
+     */
+    public function action_save_person_access()
+    {
+        $this->auto_render = FALSE;
+
+        if ($this->request->method() !== 'POST')
+        {
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => 'Метод не поддерживается',
+            ), 405);
+            return;
+        }
+
+        $post = $this->request->post();
+        $tabnum = trim((string) Arr::get($post, 'tabnum', ''));
+        $values = Arr::get($post, 'access', array());
+
+        if ($tabnum === '')
+        {
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => 'Не выбран сотрудник для сохранения категорий доступа',
+            ));
+            return;
+        }
+
+        if ( ! is_array($values))
+        {
+            $values = array($values);
+        }
+
+        $ids = array();
+        $invalid = array();
+
+        foreach ($values as $value)
+        {
+            if (is_array($value) OR $value === NULL)
+            {
+                continue;
+            }
+
+            $value = trim((string) $value);
+
+            if ($value === '')
+            {
+                continue;
+            }
+
+            // Идентификатор ACCESSNAME — неотрицательное целое;
+            // 0 — рабочая системная категория (Check Time)
+            if ( ! preg_match('/^\d{1,9}$/', $value))
+            {
+                $invalid[] = $value;
+                continue;
+            }
+
+            $ids[] = (int) $value;
+        }
+
+        if ( ! empty($invalid))
+        {
+            $this->_json(array(
+                'success' => FALSE,
+                'message' => 'Некорректный идентификатор категории доступа: '
+                    . implode(', ', array_slice($invalid, 0, 5)),
+                'errors'  => array(
+                    'access' => 'Ожидаются числовые идентификаторы категорий',
+                ),
+                'tabnum'  => $tabnum,
+            ));
+            return;
+        }
+
+        try
+        {
+            $saved = $this->_access()->savePersonAccess($tabnum, $ids);
+
+            $this->_json(array(
+                'success'  => TRUE,
+                'message'  => 'Набор категорий доступа сохранён',
+                'tabnum'   => $tabnum,
+                'assigned' => $saved,
+                'count'    => count($saved),
+            ));
+        }
+        catch (Exception $e)
+        {
+            Kohana::$log->add(Log::ERROR, 'restmancard: не удалось сохранить категории доступа сотрудника :tabnum: :message' . PHP_EOL . $e->getTraceAsString(), array(
+                ':tabnum'  => $tabnum,
+                ':message' => $e->getMessage(),
+            ));
+
+            $this->_json($this->_save_person_access_failure($e, $tabnum));
+        }
+    }
+
+    /**
+     * Ответ на ошибку сохранения набора категорий доступа сотрудника.
+     *
+     * @param   Exception  $e
+     * @param   string     $tabnum
+     * @return  array
+     */
+    protected function _save_person_access_failure(Exception $e, $tabnum)
+    {
+        $result = array(
+            'success' => FALSE,
+            'message' => $e->getMessage(),
+            'tabnum'  => $tabnum,
+        );
+
+        $status = $this->_api_status($e);
+        $reason = $this->_api_reason();
+
+        if ($status > 0)
+        {
+            $result['status'] = $status;
+        }
+
+        if ($reason !== '')
+        {
+            $result['reason'] = $reason;
+        }
+
+        if ($status === 422 AND $reason === 'ACCESSNAME_NOT_FOUND')
+        {
+            $api_message = $this->_api_message();
+
+            $result['message'] = (($api_message !== '') ? $api_message : 'Категории доступа не найдены.')
+                . ' Справочник категорий изменился — обновите страницу и повторите выбор.';
+            $result['errors'] = array(
+                'access' => 'Часть категорий отсутствует в базе',
+            );
+        }
+        elseif ($status === 404)
+        {
+            $result['message'] = 'Сотрудник не найден — возможно, он уже удалён. Обновите страницу.';
+        }
+        elseif ($status === 403)
+        {
+            $result['message'] = 'Недостаточно прав для изменения категорий доступа сотрудника.';
+        }
+        elseif ($status === 422 OR $status === 400)
+        {
+            $api_message = $this->_api_message();
+
+            $result['message'] = ($api_message !== '')
+                ? $api_message
+                : 'REST API отклонил набор категорий доступа.';
+        }
+        elseif ($status === 0)
+        {
+            $result['message'] = 'REST API недоступен. Проверьте, что сервис запущен.';
+        }
+
+        return $result;
+    }
+
+    /**
      * AJAX: категории доступа выбранной организации или сотрудника.
      *
      * Параметры (GET или POST):
@@ -1584,6 +2092,40 @@ class Controller_Restmancard extends Controller_Template
             );
 
             $this->_collect($node['CHILDREN'], $orgs, $people, $node['NAME']);
+        }
+    }
+
+    /**
+     * Собрать плоские данные сотрудников для формы restmancard/people.
+     *
+     * В отличие от _collect() здесь не нужны идентификаторы (карты) и список
+     * сотрудников организации: важны ФИО, tabnum и организация сотрудника.
+     *
+     * @param   array  $branch
+     * @param   array  $people
+     */
+    protected function _collect_people(array $branch, array & $people)
+    {
+        foreach ($branch as $node)
+        {
+            foreach ($node['PEOPLE'] as $person)
+            {
+                $people[$person['UID']] = array(
+                    'uid'         => $person['UID'],
+                    'tabnum'      => $person['TABNUM'],
+                    'surname'     => $person['SURNAME'],
+                    'name'        => $person['NAME'],
+                    'patronymic'  => $person['PATRONYMIC'],
+                    'full_name'   => $person['FULL_NAME'],
+                    'org_id'      => (int) $node['ID'],
+                    'org_divcode' => $node['DIVCODE'],
+                    'org_name'    => $node['NAME'],
+                    'org_path'    => $node['PATH'],
+                    'org_known'   => empty($node['IS_PEOPLE_ROOT']),
+                );
+            }
+
+            $this->_collect_people($node['CHILDREN'], $people);
         }
     }
 

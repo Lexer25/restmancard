@@ -13,12 +13,18 @@
  *       -> [id_accessname, ...]   (полная замена связей в SS_ACCESSORG)
  *   GET /api/v2/Access/GetPeople?id_accessname=...&pageIndex=0&pageSize=1000
  *       -> {context: [{tabnum}], pageCount, ...}
+ *   GET /api/v2/Person/Access?tabnum=...
+ *       -> [id_accessname, ...]   (набор сотрудника, сервис 1.6.0)
+ *   PUT /api/v2/Person/Access
+ *       <- {tabnum, accessnames: [id_accessname, ...]}
+ *       -> [id_accessname, ...]   (полная замена связей в SS_ACCESSUSER)
  *
- * У API нет метода «категории одного сотрудника», поэтому обратная карта
- * «tabnum -> [ID_ACCESSNAME]» строится один раз: для каждой категории
- * запрашивается Access/GetPeople и из ответа собираются tabnum. Карта
- * кешируется, чтобы выбор сотрудника в дереве не делал десятки запросов
- * на каждый клик.
+ * У API v1.5.0 не было метода «категории одного сотрудника», поэтому
+ * обратная карта «tabnum -> [ID_ACCESSNAME]» строится один раз: для каждой
+ * категории запрашивается Access/GetPeople и из ответа собираются tabnum.
+ * Карта кешируется, чтобы выбор сотрудника в дереве не делал десятки запросов
+ * на каждый клик. С версии сервиса 1.6.0 карта используется только как
+ * резерв: набор читается одним запросом GET /api/v2/Person/Access.
  *
  * Идентификатор категории 0 — допустимое значение (системная категория
  * «Check Time»), поэтому нигде не используется проверка «id > 0».
@@ -232,6 +238,11 @@ class Model_Restmancard_Access extends Model
     /**
      * Категории доступа, выданные сотруднику (по tabnum).
      *
+     * Сначала читается GET /api/v2/Person/Access?tabnum=... — метод сервиса
+     * REST API v2 версии 1.6.0, который отдаёт набор сотрудника одним
+     * запросом. Если сервис старее и метода нет (404/405 без JSON-ошибки),
+     * модуль откатывается на обратную карту Access/GetPeople.
+     *
      * @param   string  $tabnum
      * @return  array  array('ids' => array, 'error' => string|NULL, 'warnings' => array)
      */
@@ -248,6 +259,29 @@ class Model_Restmancard_Access extends Model
             );
         }
 
+        $direct = $this->getPersonAccessDirect($tabnum);
+
+        if ($direct['error'] === NULL)
+        {
+            return array(
+                'ids'      => $direct['ids'],
+                'error'    => NULL,
+                'warnings' => array(),
+            );
+        }
+
+        // Ошибка нового метода означает реальную проблему (нет сотрудника,
+        // нет прав, сервис недоступен) — подменять её пустым набором нельзя.
+        if ( ! $this->_person_access_endpoint_absent())
+        {
+            return array(
+                'ids'      => array(),
+                'error'    => $direct['error'],
+                'warnings' => array(),
+            );
+        }
+
+        // Старый сервис: метода нет — строим карту по Access/GetPeople.
         $map = $this->getPersonAccessMap();
 
         if ($map['error'] !== NULL)
@@ -269,6 +303,142 @@ class Model_Restmancard_Access extends Model
             'error'    => NULL,
             'warnings' => $map['warnings'],
         );
+    }
+
+    /**
+     * Набор категорий доступа сотрудника одним запросом.
+     *
+     * GET /api/v2/Person/Access?tabnum=... — ответ JSON-массив
+     * идентификаторов ID_ACCESSNAME.
+     *
+     * @param   string  $tabnum
+     * @return  array  array('ids' => array, 'error' => string|NULL)
+     */
+    public function getPersonAccessDirect($tabnum)
+    {
+        $tabnum = trim((string) $tabnum);
+
+        if ($tabnum === '')
+        {
+            return array(
+                'ids'   => array(),
+                'error' => 'Не указан табельный номер сотрудника (tabnum)',
+            );
+        }
+
+        try
+        {
+            $response = $this->_api->get('/api/v2/Person/Access', array(
+                'tabnum' => $tabnum,
+            ));
+        }
+        catch (Exception $e)
+        {
+            return array(
+                'ids'   => array(),
+                'error' => $e->getMessage(),
+            );
+        }
+
+        return array(
+            'ids'   => $this->_normalize_ids($response),
+            'error' => NULL,
+        );
+    }
+
+    /**
+     * Сохранить набор категорий доступа сотрудника.
+     *
+     * PUT /api/v2/Person/Access заменяет набор целиком:
+     * недостающие связи добавляются, лишние удаляются, пустой массив
+     * очищает набор. Дубликаты отсеиваются и здесь.
+     *
+     * Метод намеренно выбрасывает исключение: контроллеру нужен HTTP-статус
+     * (404 — нет сотрудника, 422 — в наборе неизвестная категория, 403 — нет
+     * прав), чтобы показать причину пользователю.
+     *
+     * @param   string  $tabnum
+     * @param   array   $ids  идентификаторы ACCESSNAME.ID_ACCESSNAME
+     * @return  array   сохранённый набор (нормализованные целые ID)
+     * @throws  Kohana_Exception
+     */
+    public function savePersonAccess($tabnum, array $ids)
+    {
+        $tabnum = trim((string) $tabnum);
+
+        if ($tabnum === '')
+        {
+            throw new Kohana_Exception('Не указан табельный номер сотрудника (tabnum)');
+        }
+
+        $normalized = array();
+
+        foreach ($ids as $id)
+        {
+            if ($id === NULL OR is_bool($id) OR ! is_numeric($id))
+            {
+                continue;
+            }
+
+            $id = (int) $id;
+
+            // Отрицательных категорий нет; 0 — «Check Time» и допустим.
+            if ($id < 0)
+            {
+                continue;
+            }
+
+            $normalized[$id] = $id;
+        }
+
+        $normalized = array_values($normalized);
+        sort($normalized, SORT_NUMERIC);
+
+        $response = $this->_api->put('/api/v2/Person/Access', array(
+            'tabnum'      => $tabnum,
+            'accessnames' => $normalized,
+        ));
+
+        // Обратная карта «tabnum -> категории» устарела: в новых сервисах
+        // она не используется, но старая версия могла её закешировать.
+        $this->_api->forget(Model_Restmancard_Api::CACHE_PREFIX . 'access_people_map');
+
+        return $this->_normalize_ids($response);
+    }
+
+    /**
+     * Метод GET /api/v2/Person/Access отсутствует в сервисе?
+     *
+     * Старый сервис отвечает на неизвестный маршрут 404 без JSON-ошибки,
+     * новый — 404 с кодом NOT_FOUND (сотрудник не найден). Различаем их,
+     * чтобы откатиться на карту только при отсутствии метода.
+     *
+     * @return  bool
+     */
+    protected function _person_access_endpoint_absent()
+    {
+        $error = $this->_api->lastError();
+
+        if ( ! is_array($error))
+        {
+            return FALSE;
+        }
+
+        $status = (int) Arr::get($error, 'status', 0);
+
+        if ($status !== 404 AND $status !== 405)
+        {
+            return FALSE;
+        }
+
+        $data = Arr::get($error, 'data', NULL);
+
+        if (is_array($data) AND trim((string) Arr::get($data, 'error', '')) !== '')
+        {
+            return FALSE;
+        }
+
+        return TRUE;
     }
 
     /**

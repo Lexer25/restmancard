@@ -757,6 +757,133 @@ class Model_Restmancard_People extends Model
     }
 
     /**
+     * Проверить данные изменения ФИО сотрудника.
+     *
+     * Проверяются только поля формы: сам сотрудник определяется по tabnum,
+     * а его существование окончательно подтверждает API (404).
+     *
+     * @param   array  $data  tabnum, surname, name, patronymic
+     * @return  array  ошибки в виде field => message; пустой массив — данные корректны
+     */
+    public function validatePersonUpdate(array $data)
+    {
+        $errors = array();
+
+        $tabnum = trim((string) Arr::get($data, 'tabnum', ''));
+
+        if ($tabnum === '')
+        {
+            $errors['tabnum'] = 'Не выбран сотрудник для изменения';
+        }
+        elseif ($this->_length($tabnum) > self::TABNUM_MAX_LENGTH)
+        {
+            $errors['tabnum'] = 'Табельный номер не должен превышать ' . self::TABNUM_MAX_LENGTH . ' символов';
+        }
+
+        $surname = trim((string) Arr::get($data, 'surname', ''));
+
+        if ($surname === '')
+        {
+            $errors['surname'] = 'Введите фамилию сотрудника';
+        }
+        elseif ($this->_length($surname) > self::NAME_MAX_LENGTH)
+        {
+            $errors['surname'] = 'Фамилия не должна превышать ' . self::NAME_MAX_LENGTH . ' символов';
+        }
+
+        foreach (array('name' => 'Имя', 'patronymic' => 'Отчество') as $field => $label)
+        {
+            $value = trim((string) Arr::get($data, $field, ''));
+
+            if ($this->_length($value) > self::NAME_MAX_LENGTH)
+            {
+                $errors[$field] = $label . ' не должно превышать ' . self::NAME_MAX_LENGTH . ' символов';
+            }
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Изменить ФИО сотрудника через PUT /api/v2/Person.
+     *
+     * Контракт (сервис REST API v2 версии 1.6.0):
+     *   PUT /api/v2/Person
+     *   <- {tabnum, surname, name, patronymic}
+     *   -> {tabnum, surname, name, patronymic}
+     *
+     * Тело заменяет ФИО целиком: фамилия обязательна, имя и отчество могут
+     * быть пустыми. Табельный номер (tabnum) неизменяем — он служит ключом.
+     *
+     * @param   string  $tabnum
+     * @param   array   $data  surname, name, patronymic
+     * @return  array   сохранённое ФИО во внутреннем виде
+     * @throws  Kohana_Exception
+     */
+    public function updatePerson($tabnum, array $data)
+    {
+        $tabnum = trim((string) $tabnum);
+
+        if ($tabnum === '')
+        {
+            throw new Kohana_Exception('Не указан табельный номер сотрудника (tabnum)');
+        }
+
+        if ($this->_length($tabnum) > self::TABNUM_MAX_LENGTH)
+        {
+            throw new Kohana_Exception('Табельный номер не должен превышать :max символов', array(
+                ':max' => self::TABNUM_MAX_LENGTH,
+            ));
+        }
+
+        $surname = trim((string) Arr::get($data, 'surname', ''));
+        $name = trim((string) Arr::get($data, 'name', ''));
+        $patronymic = trim((string) Arr::get($data, 'patronymic', ''));
+
+        if ($surname === '')
+        {
+            throw new Kohana_Exception('Не указана фамилия сотрудника (surname)');
+        }
+
+        foreach (array('surname' => $surname, 'name' => $name, 'patronymic' => $patronymic) as $field => $value)
+        {
+            if ($this->_length($value) > self::NAME_MAX_LENGTH)
+            {
+                throw new Kohana_Exception('Поле :field не должно превышать :max символов', array(
+                    ':field' => $field,
+                    ':max'   => self::NAME_MAX_LENGTH,
+                ));
+            }
+        }
+
+        $response = $this->_api->put('/api/v2/Person', array(
+            'tabnum'     => $tabnum,
+            'surname'    => $surname,
+            'name'       => $name,
+            'patronymic' => $patronymic,
+        ));
+
+        $this->_forget_people_cache();
+
+        // Ответ может отсутствовать или быть пустым: тогда считаем, что
+        // сохранены отправленные значения.
+        $row = is_array($response) ? $response : array();
+
+        $saved_tabnum = trim((string) Arr::get($row, 'tabnum', $tabnum));
+        $saved_surname = trim((string) Arr::get($row, 'surname', $surname));
+        $saved_name = trim((string) Arr::get($row, 'name', $name));
+        $saved_patronymic = trim((string) Arr::get($row, 'patronymic', $patronymic));
+
+        return array(
+            'TABNUM'     => ($saved_tabnum !== '') ? $saved_tabnum : $tabnum,
+            'SURNAME'    => $saved_surname,
+            'NAME'       => $saved_name,
+            'PATRONYMIC' => $saved_patronymic,
+            'FULL_NAME'  => trim($saved_surname . ' ' . $saved_name . ' ' . $saved_patronymic),
+        );
+    }
+
+    /**
      * Удалить сотрудника через DELETE /api/v2/Person?tabnum=...
      *
      * API удаляет сотрудника вместе с его идентификаторами.
