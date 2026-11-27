@@ -13,6 +13,8 @@
  * Поддерживается добавление, изменение свойств (название, родительская
  * организация, флаг) и удаление организаций, добавление и удаление
  * сотрудников, а также выдача набора категорий доступа организации.
+ * В форме «Организации» изменение набора можно применить только к ней или
+ * каскадно — к дочерним организациям и сотрудникам выбранной организации.
  * Все изменения выполняются через REST API v2.
  */
 class Controller_Restmancard extends Controller_Template
@@ -80,6 +82,7 @@ class Controller_Restmancard extends Controller_Template
         $error = NULL;
         $warnings = array();
         $tree = array();
+        $root_divcode = NULL;
         $org_model = $this->_org();
 
         $stats = array(
@@ -101,6 +104,7 @@ class Controller_Restmancard extends Controller_Template
         try
         {
             $tree = $org_model->getTree($focus_divcode);
+            $root_divcode = $org_model->rootDivcode();
             $warnings = $org_model->getWarnings();
 
             $model_stats = $org_model->getStats();
@@ -137,7 +141,7 @@ class Controller_Restmancard extends Controller_Template
         // Данные для панели «Свойства» (JSON для JS)
         $orgs = array();
         $people = array();
-        $this->_collect($tree, $orgs, $people, '');
+        $this->_collect($tree, $orgs, $people, '', $root_divcode);
 
         // Варианты для выбора родительской организации в форме добавления
         $parent_options = array();
@@ -165,6 +169,7 @@ class Controller_Restmancard extends Controller_Template
             'meta'   => array(
                 'org_map_enabled' => ! empty($stats['people_map_enabled']),
                 'people_root'     => (string) Arr::get($stats, 'people_root', ''),
+                'root_divcode'    => (string) $root_divcode,
                 'focus'           => $focus_divcode,
             ),
         );
@@ -247,6 +252,7 @@ class Controller_Restmancard extends Controller_Template
         $error = NULL;
         $warnings = array();
         $tree = array();
+        $root_divcode = NULL;
         $org_model = $this->_org();
 
         $stats = array(
@@ -258,6 +264,7 @@ class Controller_Restmancard extends Controller_Template
         try
         {
             $tree = $org_model->getOrganizationTree($focus_divcode);
+            $root_divcode = $org_model->rootDivcode();
             $warnings = $org_model->getWarnings();
 
             $model_stats = $org_model->getStats();
@@ -293,12 +300,13 @@ class Controller_Restmancard extends Controller_Template
         // Плоские данные для формы: значения текущей организации и список
         // вариантов родителя.
         $orgs = array();
-        $this->_collect_orgs($tree, $orgs, '');
+        $this->_collect_orgs($tree, $orgs, '', $root_divcode);
 
         $data = array(
             'orgs' => $orgs,
             'meta' => array(
-                'focus' => $focus_divcode,
+                'root_divcode' => (string) $root_divcode,
+                'focus'        => $focus_divcode,
             ),
         );
 
@@ -375,6 +383,7 @@ class Controller_Restmancard extends Controller_Template
         $error = NULL;
         $warnings = array();
         $tree = array();
+        $root_divcode = NULL;
         $org_model = $this->_org();
 
         $stats = array(
@@ -391,6 +400,7 @@ class Controller_Restmancard extends Controller_Template
         try
         {
             $tree = $org_model->getPeopleTree($focus_divcode);
+            $root_divcode = $org_model->rootDivcode();
             $warnings = $org_model->getWarnings();
 
             $model_stats = $org_model->getStats();
@@ -428,14 +438,15 @@ class Controller_Restmancard extends Controller_Template
         $people = array();
         $orgs = array();
         $this->_collect_people($tree, $people);
-        $this->_collect_orgs($tree, $orgs, '');
+        $this->_collect_orgs($tree, $orgs, '', $root_divcode);
 
         $data = array(
             'people' => $people,
             'orgs'   => $orgs,
             'meta'   => array(
-                'focus'  => $focus_divcode,
-                'person' => $focus_person,
+                'root_divcode' => (string) $root_divcode,
+                'focus'        => $focus_divcode,
+                'person'       => $focus_person,
             ),
         );
 
@@ -1329,6 +1340,23 @@ class Controller_Restmancard extends Controller_Template
      * Набор заменяется целиком: переданные категории выдаются, отсутствующие
      * снимаются, пустой массив очищает набор.
      *
+     * Параметр scope управляет дальнейшим применением изменений:
+     *   org     — изменить набор только у выбранной организации (по умолчанию;
+     *             так работают прежние вызовы из restmancard/index);
+     *   cascade — дополнительно добавить/снять ту же разницу у всех дочерних
+     *             организаций (рекурсивно) и у сотрудников, входящих
+     *             непосредственно в выбранную организацию.
+     *
+     * Разница «было / стало» считается до записи: текущий набор читается
+     * через GET .../accessnames и сравнивается с присланным. Поэтому каскад
+     * применяет только фактическую разницу, а остальные категории дочерних
+     * организаций и сотрудников сохраняются без изменений.
+     *
+     * Для scope=cascade дочерние организации и сотрудники определяются до
+     * сохранения набора: если список получить нельзя или он превышает
+     * предохранители access.cascade_max_orgs / access.cascade_max_people,
+     * запрос завершается ошибкой и ничего не меняет.
+     *
      * @return  void
      */
     public function action_save_access()
@@ -1347,6 +1375,12 @@ class Controller_Restmancard extends Controller_Template
         $post = $this->request->post();
         $divcode = trim((string) Arr::get($post, 'divcode', ''));
         $values = Arr::get($post, 'access', array());
+        $scope = strtolower(trim((string) Arr::get($post, 'scope', 'org')));
+
+        if ($scope !== 'cascade')
+        {
+            $scope = 'org';
+        }
 
         if ($divcode === '')
         {
@@ -1404,17 +1438,61 @@ class Controller_Restmancard extends Controller_Template
             return;
         }
 
+        $access_model = $this->_access();
+        $before_ids = NULL;
+        $diff = array(
+            'added'   => array(),
+            'removed' => array(),
+            'changed' => FALSE,
+        );
+        $targets = NULL;
+
+        // Проверки до записи: при ошибке набор организации ещё не изменён.
         try
         {
-            $saved = $this->_access()->saveOrganizationAccess($divcode, $ids);
+            $before = $access_model->getOrganizationAccess($divcode);
+
+            if ($before['error'] === NULL)
+            {
+                $before_ids = $before['ids'];
+                $diff = $access_model->diffSets($before_ids, $ids);
+            }
+            elseif ($scope === 'cascade')
+            {
+                // Без текущего набора нельзя понять, что именно добавлять
+                // и снимать у дочерних организаций и сотрудников.
+                throw new Kohana_Exception(
+                    'Не удалось прочитать текущий набор категорий доступа организации :divcode: :message',
+                    array(
+                        ':divcode' => $divcode,
+                        ':message' => $before['error'],
+                    )
+                );
+            }
+
+            if ($scope === 'cascade' AND $diff['changed'])
+            {
+                $targets = $this->_access_cascade_targets($divcode, $access_model);
+            }
+        }
+        catch (Exception $e)
+        {
+            Kohana::$log->add(Log::ERROR, 'restmancard: каскадное изменение категорий доступа организации :divcode не начато: :message', array(
+                ':divcode' => $divcode,
+                ':message' => $e->getMessage(),
+            ));
 
             $this->_json(array(
-                'success'  => TRUE,
-                'message'  => 'Набор категорий доступа сохранён',
-                'divcode'  => $divcode,
-                'assigned' => $saved,
-                'count'    => count($saved),
+                'success' => FALSE,
+                'message' => $e->getMessage(),
+                'divcode' => $divcode,
             ));
+            return;
+        }
+
+        try
+        {
+            $saved = $access_model->saveOrganizationAccess($divcode, $ids);
         }
         catch (Exception $e)
         {
@@ -1424,7 +1502,293 @@ class Controller_Restmancard extends Controller_Template
             ));
 
             $this->_json($this->_save_access_failure($e, $divcode));
+            return;
         }
+
+        // Ответ PUT может быть пустым — для панели важен фактический набор.
+        if (empty($saved) AND ! empty($ids))
+        {
+            $saved = $access_model->applyDiff(array(), $ids, array());
+        }
+
+        $result = array(
+            'success'     => TRUE,
+            'message'     => 'Набор категорий доступа сохранён',
+            'divcode'     => $divcode,
+            'scope'       => $scope,
+            'assigned'    => $saved,
+            'count'       => count($saved),
+            'added'       => $diff['added'],
+            'removed'     => $diff['removed'],
+            'changed'     => $diff['changed'],
+            'diff_loaded' => ($before_ids !== NULL),
+        );
+
+        if ($scope === 'cascade' AND $diff['changed'] AND $targets !== NULL)
+        {
+            try
+            {
+                $cascade = $this->_apply_access_cascade(
+                    $access_model,
+                    $targets,
+                    $diff['added'],
+                    $diff['removed']
+                );
+
+                $result['message'] = $this->_cascade_access_message($cascade['summary']);
+                $result['cascade'] = $cascade['summary'];
+
+                if ( ! empty($cascade['warnings']))
+                {
+                    $result['warnings'] = $cascade['warnings'];
+                }
+
+                if ( ! empty($cascade['errors']))
+                {
+                    $result['cascade_errors'] = $cascade['errors'];
+                }
+            }
+            catch (Exception $e)
+            {
+                // Набор организации уже сохранён: сообщаем об успехе с
+                // предупреждением, а не подменяем его ошибкой сохранения.
+                Kohana::$log->add(Log::ERROR, 'restmancard: набор организации :divcode сохранён, но каскад не выполнен: :message' . PHP_EOL . $e->getTraceAsString(), array(
+                    ':divcode' => $divcode,
+                    ':message' => $e->getMessage(),
+                ));
+
+                $result['warnings'] = array(
+                    'Набор организации сохранён, но применить его к дочерним организациям и сотрудникам не удалось: '
+                    . $e->getMessage(),
+                );
+            }
+        }
+        elseif ($scope === 'cascade')
+        {
+            $result['message'] = 'Набор категорий доступа не изменился — применять к дочерним организациям и сотрудникам нечего.';
+        }
+
+        $this->_json($result);
+    }
+
+    /**
+     * Цели каскадного изменения набора категорий организации.
+     *
+     * Возвращает все дочерние организации (рекурсивно) и табельные номера
+     * сотрудников, закреплённых непосредственно за выбранной организацией.
+     * Сотрудники дочерних организаций в список не попадают: их личный набор
+     * по условию задачи не меняется.
+     *
+     * Список организаций перечитывается (кеш orgs_v2 сбрасывается), чтобы
+     * каскад не пропустил подразделение, добавленное после открытия страницы.
+     * Список сотрудников читается из Firebird по PEOPLE.ID_ORG.
+     *
+     * @param   string                        $divcode
+     * @param   Model_Restmancard_Access      $access_model
+     * @return  array  array(
+     *                     'id'       => int,
+     *                     'divcode'  => string,
+     *                     'children' => array,
+     *                     'tabnums'  => array,
+     *                 )
+     * @throws  Kohana_Exception
+     */
+    protected function _access_cascade_targets($divcode, $access_model)
+    {
+        $this->_api()->forget(Model_Restmancard_Api::CACHE_PREFIX . 'orgs_v2');
+
+        $org_model = $this->_org();
+        $organization = $org_model->getOrganizationByDivcode($divcode);
+
+        if ($organization === NULL)
+        {
+            throw new Kohana_Exception(
+                'Организация :divcode не найдена в списке организаций — обновите страницу и повторите сохранение',
+                array(':divcode' => $divcode)
+            );
+        }
+
+        $children = $org_model->descendantDivcodes($divcode);
+
+        $people = $this->_people()->getTabnumsByOrganization((int) $organization['ID']);
+
+        if ($people['error'] !== NULL)
+        {
+            throw new Kohana_Exception(
+                'Не удалось получить сотрудников организации :divcode: :message. '
+                . 'Каскадное изменение не выполнено, набор организации не изменён.',
+                array(
+                    ':divcode' => $divcode,
+                    ':message' => $people['error'],
+                )
+            );
+        }
+
+        $limits = $access_model->cascadeLimits();
+
+        if (count($children) > $limits['max_orgs'] OR count($people['tabnums']) > $limits['max_people'])
+        {
+            $details = array();
+
+            if (count($children) > $limits['max_orgs'])
+            {
+                $details[] = 'дочерних организаций — ' . count($children)
+                    . ' (лимит ' . $limits['max_orgs'] . ')';
+            }
+
+            if (count($people['tabnums']) > $limits['max_people'])
+            {
+                $details[] = 'сотрудников — ' . count($people['tabnums'])
+                    . ' (лимит ' . $limits['max_people'] . ')';
+            }
+
+            throw new Kohana_Exception(
+                'Каскадное изменение не выполнено: слишком много элементов — '
+                . implode(', ', $details)
+                . '. Увеличьте access.cascade_max_orgs / access.cascade_max_people '
+                . 'или выберите «Только к организации». Набор организации не изменён.'
+            );
+        }
+
+        return array(
+            'id'       => (int) $organization['ID'],
+            'divcode'  => (string) $organization['DIVCODE'],
+            'children' => $children,
+            'tabnums'  => $people['tabnums'],
+        );
+    }
+
+    /**
+     * Применить разницу набора категорий к дочерним организациям и сотрудникам.
+     *
+     * Для каждой дочерней организации и каждого сотрудника набор читается
+     * целиком, из него добавляются/снимаются только категории из разницы,
+     * после чего набор сохраняется через PUT. Если у элемента разницы нет
+     * (категория уже была или её уже нет), запрос на запись не выполняется.
+     *
+     * Ошибка одного элемента не прерывает остальные: она попадает в
+     * 'errors', а в 'warnings' выводится сводка. Итог всегда возвращается,
+     * чтобы контроллер мог сообщить о частичном успехе.
+     *
+     * @param   Model_Restmancard_Access  $access_model
+     * @param   array                     $targets
+     * @param   array                     $added
+     * @param   array                     $removed
+     * @return  array  array(
+     *                     'summary'  => array,
+     *                     'warnings' => array,
+     *                     'errors'   => array,
+     *                 )
+     */
+    protected function _apply_access_cascade($access_model, array $targets, array $added, array $removed)
+    {
+        $summary = array(
+            'children_total'     => count($targets['children']),
+            'children_updated'   => 0,
+            'children_unchanged' => 0,
+            'children_failed'    => 0,
+            'people_total'       => count($targets['tabnums']),
+            'people_updated'     => 0,
+            'people_unchanged'   => 0,
+            'people_failed'      => 0,
+        );
+
+        $errors = array();
+
+        foreach ($targets['children'] as $child_divcode)
+        {
+            try
+            {
+                $applied = $access_model->applyOrganizationAccessDiff($child_divcode, $added, $removed);
+
+                if ($applied['changed'])
+                {
+                    $summary['children_updated']++;
+                }
+                else
+                {
+                    $summary['children_unchanged']++;
+                }
+            }
+            catch (Exception $e)
+            {
+                $summary['children_failed']++;
+                $errors[] = 'организация ' . $child_divcode . ': ' . $e->getMessage();
+
+                Kohana::$log->add(Log::WARNING, 'restmancard: не удалось изменить категории доступа дочерней организации :divcode: :message', array(
+                    ':divcode' => $child_divcode,
+                    ':message' => $e->getMessage(),
+                ));
+            }
+        }
+
+        foreach ($targets['tabnums'] as $tabnum)
+        {
+            try
+            {
+                $applied = $access_model->applyPersonAccessDiff($tabnum, $added, $removed);
+
+                if ($applied['changed'])
+                {
+                    $summary['people_updated']++;
+                }
+                else
+                {
+                    $summary['people_unchanged']++;
+                }
+            }
+            catch (Exception $e)
+            {
+                $summary['people_failed']++;
+                $errors[] = 'сотрудник ' . $tabnum . ': ' . $e->getMessage();
+
+                Kohana::$log->add(Log::WARNING, 'restmancard: не удалось изменить категории доступа сотрудника :tabnum: :message', array(
+                    ':tabnum'  => $tabnum,
+                    ':message' => $e->getMessage(),
+                ));
+            }
+        }
+
+        $warnings = array();
+
+        if ( ! empty($errors))
+        {
+            $warnings[] = 'Не удалось обновить часть элементов (' . count($errors) . '). '
+                . 'Первые ошибки: ' . implode('; ', array_slice($errors, 0, 3))
+                . (count($errors) > 3 ? ' …' : '');
+        }
+
+        return array(
+            'summary'  => $summary,
+            'warnings' => $warnings,
+            'errors'   => array_slice($errors, 0, 20),
+        );
+    }
+
+    /**
+     * Текст успешного ответа каскадного сохранения.
+     *
+     * @param   array  $summary
+     * @return  string
+     */
+    protected function _cascade_access_message(array $summary)
+    {
+        if ($summary['children_total'] === 0 AND $summary['people_total'] === 0)
+        {
+            return 'Набор категорий доступа сохранён. Дочерних организаций и сотрудников для обновления нет.';
+        }
+
+        $message = 'Набор категорий доступа сохранён. Дочерние организации: обновлено '
+            . $summary['children_updated'] . ' из ' . $summary['children_total']
+            . '; сотрудники: обновлено ' . $summary['people_updated']
+            . ' из ' . $summary['people_total'] . '.';
+
+        if ($summary['children_failed'] > 0 OR $summary['people_failed'] > 0)
+        {
+            $message .= ' Часть элементов обновить не удалось.';
+        }
+
+        return $message;
     }
 
     /**
@@ -2040,14 +2404,47 @@ class Controller_Restmancard extends Controller_Template
     }
 
     /**
+     * Родитель организации для формы и JSON.
+     *
+     * Главная корневая организация (organizations.root_divcode) всегда
+     * показывается без родителя. Остальные организации, у которых в API
+     * parent пустой, получают в форме главную организацию — так дерево и
+     * форма свойств показывают одно и то же: «Все» стоит в корне, а
+     * сотрудники и подразделения растут из неё.
+     *
+     * @param   array       $node
+     * @param   string|NULL $root_divcode
+     * @return  string|NULL
+     */
+    protected function _form_parent(array $node, $root_divcode)
+    {
+        $root = trim((string) $root_divcode);
+
+        if ($root !== '' AND strcasecmp((string) $node['DIVCODE'], $root) === 0)
+        {
+            return NULL;
+        }
+
+        $parent = $node['PARENT'];
+
+        if ($parent !== NULL AND trim((string) $parent) !== '')
+        {
+            return $parent;
+        }
+
+        return ($root !== '') ? $root : $parent;
+    }
+
+    /**
      * Собрать плоские данные для панели «Свойства».
      *
      * @param   array  $branch
      * @param   array  $orgs
      * @param   array  $people
      * @param   string $parent_name
+     * @param   string|NULL $root_divcode
      */
-    protected function _collect(array $branch, array & $orgs, array & $people, $parent_name)
+    protected function _collect(array $branch, array & $orgs, array & $people, $parent_name, $root_divcode = NULL)
     {
         foreach ($branch as $node)
         {
@@ -2076,7 +2473,7 @@ class Controller_Restmancard extends Controller_Template
                 'id'             => (int) $node['ID'],
                 'divcode'        => $node['DIVCODE'],
                 'name'           => $node['NAME'],
-                'parent'         => $node['PARENT'],
+                'parent'         => $this->_form_parent($node, $root_divcode),
                 'parent_name'    => (string) $parent_name,
                 'flag'           => (int) $node['FLAG'],
                 'created_at'     => $this->_format_date($node['CREATED_AT']),
@@ -2091,7 +2488,7 @@ class Controller_Restmancard extends Controller_Template
                 'people'         => $person_uids,
             );
 
-            $this->_collect($node['CHILDREN'], $orgs, $people, $node['NAME']);
+            $this->_collect($node['CHILDREN'], $orgs, $people, $node['NAME'], $root_divcode);
         }
     }
 
@@ -2135,8 +2532,9 @@ class Controller_Restmancard extends Controller_Template
      * @param   array  $branch
      * @param   array  $orgs
      * @param   string $parent_name
+     * @param   string|NULL $root_divcode
      */
-    protected function _collect_orgs(array $branch, array & $orgs, $parent_name)
+    protected function _collect_orgs(array $branch, array & $orgs, $parent_name, $root_divcode = NULL)
     {
         foreach ($branch as $node)
         {
@@ -2145,7 +2543,7 @@ class Controller_Restmancard extends Controller_Template
                 'id'             => (int) $node['ID'],
                 'divcode'        => $node['DIVCODE'],
                 'name'           => $node['NAME'],
-                'parent'         => $node['PARENT'],
+                'parent'         => $this->_form_parent($node, $root_divcode),
                 'parent_name'    => (string) $parent_name,
                 'flag'           => (int) $node['FLAG'],
                 'created_at'     => $this->_format_date($node['CREATED_AT']),
@@ -2156,7 +2554,7 @@ class Controller_Restmancard extends Controller_Template
                 'total_children' => (int) $node['TOTAL_CHILDREN'],
             );
 
-            $this->_collect_orgs($node['CHILDREN'], $orgs, $node['NAME']);
+            $this->_collect_orgs($node['CHILDREN'], $orgs, $node['NAME'], $root_divcode);
         }
     }
 

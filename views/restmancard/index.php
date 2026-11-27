@@ -31,7 +31,7 @@
  * @var string $save_access_url
  */
 ?>
-<?php echo HTML::style('static/css/restmancard.css?v=2.0.0'); ?>
+<?php echo HTML::style('static/css/restmancard.css?v=2.2.0'); ?>
 
 <div class="panel panel-primary rc-root">
     <div class="panel-heading">
@@ -409,7 +409,7 @@
                                 </option>
                             <?php endforeach; ?>
                         </select>
-                        <p class="help-block"><?php echo __('Пусто — создать корневую организацию.'); ?></p>
+                        <p class="help-block"><?php echo __('Пусто — создать организацию в корне главной организации.'); ?></p>
                     </div>
 
                     <div class="form-group">
@@ -476,7 +476,7 @@
                             <option value=""><?php echo __('— Корневая организация —'); ?></option>
                         </select>
                         <p class="help-block">
-                            <?php echo __('Пусто — организация станет корневой. Саму организацию и её подразделения выбрать нельзя.'); ?>
+                            <?php echo __('Пусто — организация будет в корне главной организации. Саму организацию и её подразделения выбрать нельзя.'); ?>
                         </p>
                     </div>
 
@@ -685,6 +685,7 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
 
     var DATA = window.RESTMANCARD || { orgs: {}, people: {}, meta: {} };
     var META = DATA.meta || {};
+    var rootDivcode = (META && META.root_divcode) ? String(META.root_divcode) : '';
     var ACCESS = window.RESTMANCARD_ACCESS || { url: '', total: 0, loaded: false };
     var accessUrl = ACCESS.url || '';
     var accessTotal = parseInt(ACCESS.total, 10);
@@ -795,8 +796,12 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
         var enabled = false;
 
         if (o && o.divcode) {
-            title = <?php echo json_encode(__('Удалить выбранную организацию')); ?>;
-            enabled = true;
+            if (rootDivcode !== '' && String(o.divcode).toLowerCase() === rootDivcode.toLowerCase()) {
+                title = <?php echo json_encode(__('Главную корневую организацию удалить нельзя')); ?>;
+            } else {
+                title = <?php echo json_encode(__('Удалить выбранную организацию')); ?>;
+                enabled = true;
+            }
         } else if (p && p.tabnum) {
             title = <?php echo json_encode(__('Удалить выбранного сотрудника')); ?>;
             enabled = true;
@@ -1967,7 +1972,11 @@ window.RESTMANCARD_ACCESS = <?php echo json_encode(array(
         // reset() возвращает чекбоксу значение по умолчанию (включён)
         syncDivcodeAuto();
 
-        $('#rc-add-org-parent').val(selectedOrgDivcode());
+        // Новая организация без выбранного родителя растёт из «Все»,
+        // а не становится ещё одним корнем.
+        var parentDivcode = selectedOrgDivcode();
+
+        $('#rc-add-org-parent').val(parentDivcode !== '' ? parentDivcode : rootDivcode);
         $addModal.modal('show');
     }
 

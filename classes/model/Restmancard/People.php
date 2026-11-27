@@ -25,6 +25,10 @@
  * REST-сервис (см. getOrganizationMap()). Ошибка Firebird не критична:
  * без карты все сотрудники показываются у организации
  * restmancard.organizations.people_root_divcode.
+ *
+ * Для каскадного изменения категорий доступа нужен список сотрудников
+ * конкретной организации — его отдаёт getTabnumsByOrganization() тем же
+ * запросом к Firebird по PEOPLE.ID_ORG.
  */
 class Model_Restmancard_People extends Model
 {
@@ -251,6 +255,106 @@ class Model_Restmancard_People extends Model
         $result['error'] = NULL;
 
         return $result;
+    }
+
+    /**
+     * Табельные номера сотрудников, закреплённых за организацией.
+     *
+     * Нужны каскадному сохранению категорий доступа: набор меняется у
+     * сотрудников, входящих именно в выбранную организацию, а сотрудники
+     * дочерних организаций остаются без изменений. REST API v2 не умеет
+     * фильтровать Person/GetList по организации (и не отдаёт ID_ORG в
+     * ответе), поэтому список читается из той же базы Firebird, что и карта
+     * TABNUM -> ID_ORG: PEOPLE.ID_ORG = ID организации из REST.
+     *
+     * Фильтры те же, что у getOrganizationMap(): people.org_map_id_db и
+     * people.org_map_active_only. Ошибка БД возвращается в 'error': каскад
+     * в этом случае не начинается, чтобы не пропустить сотрудников молча.
+     *
+     * @param   int  $id_org  ID_ORG (поле id организации в REST API)
+     * @return  array  array('tabnums' => array, 'error' => string|NULL)
+     */
+    public function getTabnumsByOrganization($id_org)
+    {
+        $id_org = (int) $id_org;
+
+        if ($id_org <= 0)
+        {
+            return array(
+                'tabnums' => array(),
+                'error'   => 'Не указан идентификатор организации (ID_ORG)',
+            );
+        }
+
+        if ( ! $this->_org_map_enabled())
+        {
+            return array(
+                'tabnums' => array(),
+                'error'   => 'Привязка сотрудников к организациям отключена настройкой people.org_map',
+            );
+        }
+
+        if ( ! class_exists('DB') OR ! class_exists('Database'))
+        {
+            return array(
+                'tabnums' => array(),
+                'error'   => 'Модуль database не подключён: список сотрудников организации недоступен',
+            );
+        }
+
+        $db_name = trim((string) $this->_setting('org_map_db', 'fb'));
+
+        if ($db_name === '')
+        {
+            $db_name = 'fb';
+        }
+
+        $sql = 'SELECT p.TABNUM FROM PEOPLE p WHERE p.ID_ORG = ' . $id_org;
+
+        $id_db = (int) $this->_setting('org_map_id_db', 1);
+
+        if ($id_db > 0)
+        {
+            $sql .= ' AND p.ID_DB = ' . $id_db;
+        }
+
+        if ((bool) $this->_setting('org_map_active_only', FALSE))
+        {
+            $sql .= ' AND p."ACTIVE" = 1';
+        }
+
+        $sql .= ' ORDER BY p.TABNUM';
+
+        try
+        {
+            $rows = DB::query(Database::SELECT, $sql)
+                ->execute(Database::instance($db_name))
+                ->as_array();
+        }
+        catch (Exception $e)
+        {
+            return array(
+                'tabnums' => array(),
+                'error'   => $e->getMessage(),
+            );
+        }
+
+        $tabnums = array();
+
+        foreach ($rows as $row)
+        {
+            $tabnum = trim($this->_utf((string) Arr::get($row, 'TABNUM', Arr::get($row, 'tabnum', ''))));
+
+            if ($tabnum !== '')
+            {
+                $tabnums[$tabnum] = $tabnum;
+            }
+        }
+
+        return array(
+            'tabnums' => array_values($tabnums),
+            'error'   => NULL,
+        );
     }
 
     /**

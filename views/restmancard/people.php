@@ -9,7 +9,7 @@
  * Три панели:
  *   1) дерево организаций с сотрудниками;
  *   2) свойства выбранного сотрудника: ФИО и организация (родительская
- *      ссылка пипла);
+ *      ссылка сотрудника);
  *   3) набор категорий доступа выбранного сотрудника.
  *
  * «Сохранить» панели свойств вызывает restmancard/save_person:
@@ -37,7 +37,7 @@
  * @var bool   $access_editable
  */
 ?>
-<?php echo HTML::style('static/css/restmancard.css?v=2.0.0&layout=3col'); ?>
+<?php echo HTML::style('static/css/restmancard.css?v=2.2.0&layout=3col'); ?>
 
 <div class="panel panel-primary rc-root rc-orgs rc-people">
     <div class="panel-heading">

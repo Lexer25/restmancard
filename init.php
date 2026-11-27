@@ -1,8 +1,8 @@
 <?php defined('SYSPATH') or die('No direct script access.');
 
-defined('RESTMANCARD_VERSION') OR define('RESTMANCARD_VERSION', '2.1.0');
+defined('RESTMANCARD_VERSION') OR define('RESTMANCARD_VERSION', '2.3.0');
 
-Kohana::$config->load('menu')
+Kohana::$config->load('restmenu')
     ->set('restmancard', array(
         'title' => 'Организации и сотрудники (REST)',
         'url' => 'restmancard/index',
@@ -13,7 +13,7 @@ Kohana::$config->load('menu')
 
 // Отдельная форма только для организаций: название, родительская организация
 // и набор категорий доступа, без сотрудников.
-Kohana::$config->load('menu')
+Kohana::$config->load('restmenu')
     ->set('restmancard_orgs', array(
         'title' => 'Организации',
         'url' => 'restmancard/organizations',
@@ -22,10 +22,10 @@ Kohana::$config->load('menu')
         'disabled' => false,
     ));
 
-// Отдельная форма только для сотрудников (пиплов): ФИО, организация
+// Отдельная форма только для сотрудников: ФИО, организация
 // (родительская ссылка) и набор категорий доступа, без управления
 // организациями.
-Kohana::$config->load('menu')
+Kohana::$config->load('restmenu')
     ->set('restmancard_people', array(
         'title' => 'Сотрудники',
         'url' => 'restmancard/people',

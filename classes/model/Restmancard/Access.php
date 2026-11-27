@@ -29,6 +29,11 @@
  * Идентификатор категории 0 — допустимое значение (системная категория
  * «Check Time»), поэтому нигде не используется проверка «id > 0».
  *
+ * Для каскадного сохранения набора организации (scope=cascade) модель умеет
+ * строить разницу двух наборов (diffSets()), применять её к текущему набору
+ * (applyDiff()) и сохранять только фактическую разницу у организации и
+ * сотрудника (applyOrganizationAccessDiff(), applyPersonAccessDiff()).
+ *
  * Ошибки API не прерывают страницу: методы возвращают пустой набор и текст
  * ошибки, панель «Категории доступа» показывает его пользователю.
  */
@@ -211,21 +216,7 @@ class Model_Restmancard_Access extends Model
             throw new Kohana_Exception('Не указан код организации (divcode)');
         }
 
-        $normalized = array();
-
-        foreach ($ids as $id)
-        {
-            if ($id === NULL OR is_bool($id) OR ! is_numeric($id))
-            {
-                continue;
-            }
-
-            $id = (int) $id;
-            $normalized[$id] = $id;
-        }
-
-        $normalized = array_values($normalized);
-        sort($normalized, SORT_NUMERIC);
+        $normalized = $this->_normalize_id_set($ids);
 
         $response = $this->_api->put(
             '/api/v2/organizations/' . rawurlencode($divcode) . '/accessnames',
@@ -233,6 +224,196 @@ class Model_Restmancard_Access extends Model
         );
 
         return $this->_normalize_ids($response);
+    }
+
+    /**
+     * Разница двух наборов категорий доступа.
+     *
+     * Используется каскадным сохранением набора организации: по разнице
+     * «было / стало» видно, какие категории нужно добавить дочерним
+     * организациям и сотрудникам, а какие — снять. Идентификаторы
+     * нормализуются так же, как при записи: целые неотрицательные числа,
+     * без дубликатов, по возрастанию.
+     *
+     * @param   array  $old_ids  набор до изменения
+     * @param   array  $new_ids  набор после изменения
+     * @return  array  array(
+     *                     'added'   => array(int),  категории, которых не было
+     *                     'removed' => array(int),  категории, которые сняты
+     *                     'changed' => bool,
+     *                 )
+     */
+    public function diffSets(array $old_ids, array $new_ids)
+    {
+        $old = $this->_normalize_id_set($old_ids);
+        $new = $this->_normalize_id_set($new_ids);
+
+        $added = array_values(array_diff($new, $old));
+        $removed = array_values(array_diff($old, $new));
+
+        sort($added, SORT_NUMERIC);
+        sort($removed, SORT_NUMERIC);
+
+        return array(
+            'added'   => $added,
+            'removed' => $removed,
+            'changed' => ( ! empty($added) OR ! empty($removed)),
+        );
+    }
+
+    /**
+     * Применить разницу к текущему набору категорий.
+     *
+     * Категории из $added_ids добавляются, из $removed_ids — снимаются;
+     * остальные связи сохраняются. Результат нормализован и отсортирован,
+     * поэтому его можно сравнивать с текущим набором через ===.
+     *
+     * @param   array  $current_ids
+     * @param   array  $added_ids
+     * @param   array  $removed_ids
+     * @return  array
+     */
+    public function applyDiff(array $current_ids, array $added_ids, array $removed_ids)
+    {
+        $current = $this->_normalize_id_set($current_ids);
+        $added = $this->_normalize_id_set($added_ids);
+        $removed = $this->_normalize_id_set($removed_ids);
+
+        $result = array_values(array_diff($current, $removed));
+
+        foreach ($added as $id)
+        {
+            $result[] = $id;
+        }
+
+        $result = array_values(array_unique($result));
+        sort($result, SORT_NUMERIC);
+
+        return $result;
+    }
+
+    /**
+     * Добавить и снять категории у организации, сохранив остальные связи.
+     *
+     * Читает текущий набор через GET /api/v2/organizations/{divcode}/accessnames,
+     * применяет разницу и, если набор изменился, сохраняет его целиком через
+     * PUT .../accessnames. Если после применения набор не изменился (например,
+     * у организации уже была добавляемая категория), PUT не выполняется.
+     *
+     * @param   string  $divcode
+     * @param   array   $added_ids
+     * @param   array   $removed_ids
+     * @return  array   array('changed' => bool, 'assigned' => array)
+     * @throws  Kohana_Exception
+     */
+    public function applyOrganizationAccessDiff($divcode, array $added_ids, array $removed_ids)
+    {
+        $divcode = trim((string) $divcode);
+        $current = $this->getOrganizationAccess($divcode);
+
+        if ($current['error'] !== NULL)
+        {
+            throw new Kohana_Exception(
+                'Не удалось прочитать набор категорий доступа организации :divcode: :message',
+                array(
+                    ':divcode' => $divcode,
+                    ':message' => $current['error'],
+                )
+            );
+        }
+
+        $next = $this->applyDiff($current['ids'], $added_ids, $removed_ids);
+
+        if ($next === $current['ids'])
+        {
+            return array(
+                'changed'  => FALSE,
+                'assigned' => $next,
+            );
+        }
+
+        return array(
+            'changed'  => TRUE,
+            'assigned' => $this->saveOrganizationAccess($divcode, $next),
+        );
+    }
+
+    /**
+     * Добавить и снять категории у сотрудника, сохранив остальные связи.
+     *
+     * Читает текущий набор, применяет разницу и, если набор изменился,
+     * сохраняет его целиком через PUT /api/v2/Person/Access. Если после
+     * применения набор не изменился, PUT не выполняется.
+     *
+     * @param   string  $tabnum
+     * @param   array   $added_ids
+     * @param   array   $removed_ids
+     * @return  array   array('changed' => bool, 'assigned' => array)
+     * @throws  Kohana_Exception
+     */
+    public function applyPersonAccessDiff($tabnum, array $added_ids, array $removed_ids)
+    {
+        $tabnum = trim((string) $tabnum);
+        $current = $this->getPersonAccess($tabnum);
+
+        if ($current['error'] !== NULL)
+        {
+            throw new Kohana_Exception(
+                'Не удалось прочитать набор категорий доступа сотрудника :tabnum: :message',
+                array(
+                    ':tabnum'  => $tabnum,
+                    ':message' => $current['error'],
+                )
+            );
+        }
+
+        $next = $this->applyDiff($current['ids'], $added_ids, $removed_ids);
+
+        if ($next === $current['ids'])
+        {
+            return array(
+                'changed'  => FALSE,
+                'assigned' => $next,
+            );
+        }
+
+        return array(
+            'changed'  => TRUE,
+            'assigned' => $this->savePersonAccess($tabnum, $next),
+        );
+    }
+
+    /**
+     * Предохранители каскадного изменения набора категорий.
+     *
+     * Один каскад — это два HTTP-запроса на каждую дочернюю организацию и
+     * на каждого сотрудника. Ограничения не дают одному запросу страницы
+     * растянуться на минуты; при превышении каскад не начинается вовсе,
+     * чтобы не оставить данные обновлёнными наполовину. Значения задаются
+     * в config/restmancard.php (access.cascade_max_orgs,
+     * access.cascade_max_people).
+     *
+     * @return  array  array('max_orgs' => int, 'max_people' => int)
+     */
+    public function cascadeLimits()
+    {
+        $max_orgs = (int) $this->_setting('cascade_max_orgs', 500);
+        $max_people = (int) $this->_setting('cascade_max_people', 500);
+
+        if ($max_orgs < 1)
+        {
+            $max_orgs = 1;
+        }
+
+        if ($max_people < 1)
+        {
+            $max_people = 1;
+        }
+
+        return array(
+            'max_orgs'   => $max_orgs,
+            'max_people' => $max_people,
+        );
     }
 
     /**
@@ -371,28 +552,7 @@ class Model_Restmancard_Access extends Model
             throw new Kohana_Exception('Не указан табельный номер сотрудника (tabnum)');
         }
 
-        $normalized = array();
-
-        foreach ($ids as $id)
-        {
-            if ($id === NULL OR is_bool($id) OR ! is_numeric($id))
-            {
-                continue;
-            }
-
-            $id = (int) $id;
-
-            // Отрицательных категорий нет; 0 — «Check Time» и допустим.
-            if ($id < 0)
-            {
-                continue;
-            }
-
-            $normalized[$id] = $id;
-        }
-
-        $normalized = array_values($normalized);
-        sort($normalized, SORT_NUMERIC);
+        $normalized = $this->_normalize_id_set($ids);
 
         $response = $this->_api->put('/api/v2/Person/Access', array(
             'tabnum'      => $tabnum,
@@ -830,6 +990,43 @@ class Model_Restmancard_Access extends Model
     }
 
     /**
+     * Привести набор идентификаторов категорий к каноническому виду.
+     *
+     * Категория — целое неотрицательное число; 0 — «Check Time» и допустим.
+     * Дубликаты удаляются, значения сортируются по возрастанию — в таком
+     * виде наборы можно сравнивать через ===.
+     *
+     * @param   array  $ids
+     * @return  array
+     */
+    protected function _normalize_id_set(array $ids)
+    {
+        $set = array();
+
+        foreach ($ids as $id)
+        {
+            if ($id === NULL OR is_bool($id) OR ! is_numeric($id))
+            {
+                continue;
+            }
+
+            $id = (int) $id;
+
+            if ($id < 0)
+            {
+                continue;
+            }
+
+            $set[$id] = $id;
+        }
+
+        $set = array_values($set);
+        sort($set, SORT_NUMERIC);
+
+        return $set;
+    }
+
+    /**
      * Привести ответ accessnames к массиву целых ID.
      *
      * @param   mixed  $response
@@ -880,14 +1077,10 @@ class Model_Restmancard_Access extends Model
                 continue;
             }
 
-            $id = (int) $id;
-            $ids[$id] = $id;
+            $ids[] = $id;
         }
 
-        $ids = array_values($ids);
-        sort($ids, SORT_NUMERIC);
-
-        return $ids;
+        return $this->_normalize_id_set($ids);
     }
 
     /**

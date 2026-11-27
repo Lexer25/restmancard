@@ -127,6 +127,83 @@ class Model_Restmancard_Org extends Model
     }
 
     /**
+     * Организация является главной корневой (organizations.root_divcode)?
+     *
+     * Сравнение не зависит от загруженного списка: достаточно совпадения с
+     * настройкой. Это важно для запрета удаления и смены родителя, даже если
+     * список организаций временно недоступен.
+     *
+     * @param   string  $divcode
+     * @return  bool
+     */
+    public function isRootDivcode($divcode)
+    {
+        $divcode = trim((string) $divcode);
+
+        if ($divcode === '')
+        {
+            return FALSE;
+        }
+
+        $configured = trim((string) $this->_setting('root_divcode', 'dv_All'));
+
+        if ($configured !== '' AND strcasecmp($divcode, $configured) === 0)
+        {
+            return TRUE;
+        }
+
+        $root = $this->rootDivcode();
+
+        return ($root !== NULL AND strcasecmp($divcode, $root) === 0);
+    }
+
+    /**
+     * Код главной корневой организации.
+     *
+     * Настройка organizations.root_divcode (по умолчанию dv_All) задаёт
+     * организацию, которая всегда показывается единственной вершиной дерева.
+     * Возвращается фактическое написание кода из загруженного списка REST
+     * (сравнение без учёта регистра), чтобы parent в PUT совпадал с API.
+     *
+     * Если настройка пуста или организации с таким кодом нет в списке,
+     * возвращается NULL: правило не применяется, дерево строится по данным
+     * API как раньше.
+     *
+     * @return  string|NULL
+     */
+    public function rootDivcode()
+    {
+        $configured = trim((string) $this->_setting('root_divcode', 'dv_All'));
+
+        if ($configured === '')
+        {
+            return NULL;
+        }
+
+        try
+        {
+            $organizations = $this->getAllOrganizations();
+        }
+        catch (Exception $e)
+        {
+            // Список недоступен — дерево и сохранение сами сообщат об ошибке
+            return NULL;
+        }
+
+        foreach ($organizations as $org)
+        {
+            $code = trim((string) Arr::get($org, 'DIVCODE', ''));
+
+            if ($code !== '' AND strcasecmp($code, $configured) === 0)
+            {
+                return $code;
+            }
+        }
+
+        return NULL;
+    }
+
+    /**
      * Признак того, что последний createOrganization() сформировал код сам.
      *
      * @return  bool
@@ -444,6 +521,11 @@ class Model_Restmancard_Org extends Model
      * существует, например кеш списка устарел) код формируется заново —
      * до organizations.divcode_retry_on_conflict раз.
      *
+     * Без родителя организация получает organizations.root_divcode (dv_All).
+     * POST сервиса 1.6.0 parent игнорирует, поэтому привязка выполняется
+     * дополнительным PUT /api/v2/organizations/{divcode}; при его ошибке
+     * созданная организация удаляется, чтобы не осталась отдельным корнем.
+     *
      * @param   array  $data  name, divcode, divcode_auto, parent, flag
      * @return  array  созданная организация во внутреннем виде
      * @throws  Kohana_Exception
@@ -460,6 +542,16 @@ class Model_Restmancard_Org extends Model
         $this->_divcode_generated = $auto;
 
         $divcode = $auto ? $this->generateDivcode($name) : $requested;
+
+        // Новая организация без родителя растёт из главной корневой
+        // организации (organizations.root_divcode), а не становится ещё
+        // одним корнем. Саму главную организацию это не затрагивает.
+        $root = $this->rootDivcode();
+
+        if ($parent === '' AND $root !== NULL AND strcasecmp($divcode, $root) !== 0)
+        {
+            $parent = $root;
+        }
 
         $payload = array(
             'divcode' => $divcode,
@@ -504,13 +596,76 @@ class Model_Restmancard_Org extends Model
             }
         }
 
+        // POST /api/v2/organizations в сервисе 1.6.0 принимает parent в схеме,
+        // но фактически игнорирует его: созданная организация всегда
+        // корневая. Привязываем её к родителю отдельным PUT, иначе новая
+        // организация не попадёт под главную «Все».
+        if ($parent !== '')
+        {
+            try
+            {
+                $updated = $this->_api->put(
+                    '/api/v2/organizations/' . rawurlencode($divcode),
+                    array(
+                        'name'   => $name,
+                        'parent' => $parent,
+                        'flag'   => $flag,
+                    )
+                );
+
+                if (is_array($updated) AND ! empty($updated))
+                {
+                    $response = $updated;
+                }
+            }
+            catch (Exception $e)
+            {
+                // Не оставляем созданную организацию отдельным корнем.
+                $rolled_back = FALSE;
+
+                try
+                {
+                    $this->_api->delete('/api/v2/organizations/' . rawurlencode($divcode));
+                    $rolled_back = TRUE;
+                }
+                catch (Exception $rollback_error)
+                {
+                    // Ниже сообщим, что откатить не удалось
+                }
+
+                // Список организаций мог закешировать созданную запись.
+                $this->_api->forget(Model_Restmancard_Api::CACHE_PREFIX . 'orgs_v2');
+                $this->_stats = array();
+
+                throw new Kohana_Exception(
+                    'Организация :divcode создана, но привязать её к родителю :parent не удалось: :message'
+                    . ($rolled_back
+                        ? ' Созданная организация удалена.'
+                        : ' Удалить созданную организацию не удалось — проверьте её в API.'),
+                    array(
+                        ':divcode' => $divcode,
+                        ':parent'  => $parent,
+                        ':message' => $e->getMessage(),
+                    )
+                );
+            }
+        }
+
         // Список организаций закеширован — после создания перечитываем его.
         // Ключ версионирован: старый кеш содержал поле DEVCODE и несовместим
         // с новым именем DIVCODE.
         $this->_api->forget(Model_Restmancard_Api::CACHE_PREFIX . 'orgs_v2');
         $this->_stats = array();
 
-        return $this->_normalize_organization(is_array($response) ? $response : array());
+        $organization = $this->_normalize_organization(is_array($response) ? $response : array());
+
+        // Ответ PUT может не содержать parent — возвращаем фактическую связь.
+        if ($organization['PARENT'] === NULL AND $parent !== '')
+        {
+            $organization['PARENT'] = $parent;
+        }
+
+        return $organization;
     }
 
     /**
@@ -558,7 +713,11 @@ class Model_Restmancard_Org extends Model
 
         if ($parent !== '')
         {
-            if ($this->_length($parent) > self::DIVCODE_MAX_LENGTH
+            if ($divcode !== '' AND $this->isRootDivcode($divcode))
+            {
+                $errors['parent'] = 'Организация «' . $divcode . '» всегда корневая: родитель не выбирается';
+            }
+            elseif ($this->_length($parent) > self::DIVCODE_MAX_LENGTH
                 OR ! preg_match('/^[A-Za-z0-9._-]+$/', $parent))
             {
                 $errors['parent'] = 'Некорректный код родительской организации';
@@ -593,6 +752,11 @@ class Model_Restmancard_Org extends Model
      *   * отсутствие flag означает 0.
      * Поэтому parent и flag отправляются всегда, divcode — никогда.
      *
+     * Поверх контракта действует правило organizations.root_divcode:
+     * главная организация (dv_All) всегда остаётся корневой, а организация
+     * без выбранного родителя получает в parent главную, чтобы в дереве не
+     * появлялось новых корней.
+     *
      * @param   string  $divcode
      * @param   array   $data  name, parent, flag
      * @return  array   организация во внутреннем виде
@@ -610,6 +774,19 @@ class Model_Restmancard_Org extends Model
         $name = trim((string) Arr::get($data, 'name', ''));
         $parent = trim((string) Arr::get($data, 'parent', ''));
         $flag = ((int) Arr::get($data, 'flag', 0) === 1) ? 1 : 0;
+
+        // Главная организация всегда корневая; остальные без родителя
+        // растут из неё, а не становятся отдельными корнями.
+        $root = $this->rootDivcode();
+
+        if ($this->isRootDivcode($divcode))
+        {
+            $parent = '';
+        }
+        elseif ($parent === '' AND $root !== NULL)
+        {
+            $parent = $root;
+        }
 
         $payload = array(
             'name' => $name,
@@ -651,6 +828,10 @@ class Model_Restmancard_Org extends Model
      * (OrganizationDeleteConflict). Проверки выполняет API, поэтому локальные
      * счётчики дерева не используются как окончательный вердикт.
      *
+     * Главную корневую организацию (organizations.root_divcode) удалить
+     * нельзя: вместе с ней исчезнет вершина дерева, из которой «растут» все
+     * остальные организации.
+     *
      * @param   string  $divcode
      * @return  bool
      * @throws  Kohana_Exception
@@ -662,6 +843,14 @@ class Model_Restmancard_Org extends Model
         if ($divcode === '')
         {
             throw new Kohana_Exception('Не указан код организации для удаления');
+        }
+
+        if ($this->isRootDivcode($divcode))
+        {
+            throw new Kohana_Exception(
+                'Организация :divcode всегда корневая — удалить её нельзя',
+                array(':divcode' => $divcode)
+            );
         }
 
         $this->_api->delete('/api/v2/organizations/' . rawurlencode($divcode));
@@ -767,10 +956,37 @@ class Model_Restmancard_Org extends Model
             return array();
         }
 
+        $organizations = $this->getAllOrganizations();
+
+        // Главная корневая организация: по правилу дерева все остальные
+        // организации являются её потомками, даже если в API у них parent
+        // пустой. Это важно для каскадного изменения категорий доступа и для
+        // запрета выбрать потомка родителем главной организации.
+        $root = $this->rootDivcode();
+
+        if ($root !== NULL AND $this->_lower($root) === $start)
+        {
+            $all = array();
+
+            foreach ($organizations as $org)
+            {
+                $code = trim((string) Arr::get($org, 'DIVCODE', ''));
+
+                if ($code === '' OR $this->_lower($code) === $start)
+                {
+                    continue;
+                }
+
+                $all[$this->_lower($code)] = $code;
+            }
+
+            return array_values($all);
+        }
+
         // Родитель -> дети; ключи нормализованы, значения — исходные коды
         $children = array();
 
-        foreach ($this->getAllOrganizations() as $org)
+        foreach ($organizations as $org)
         {
             $code = trim((string) $org['DIVCODE']);
             $parent = $org['PARENT'];
@@ -978,6 +1194,10 @@ class Model_Restmancard_Org extends Model
             }
         }
 
+        // Правило главной корневой организации: «Все» всегда наверху,
+        // остальные корневые организации становятся её дочерними.
+        $this->_apply_main_root($children_map, $root_codes, $nodes);
+
         $this->_sort_codes($root_codes, $nodes);
         foreach (array_keys($children_map) as $parent_code)
         {
@@ -1160,6 +1380,10 @@ class Model_Restmancard_Org extends Model
                 $root_codes[] = $code;
             }
         }
+
+        // Правило главной корневой организации: «Все» всегда наверху,
+        // остальные корневые организации становятся её дочерними.
+        $this->_apply_main_root($children_map, $root_codes, $nodes);
 
         $this->_sort_codes($root_codes, $nodes);
         foreach (array_keys($children_map) as $parent_code)
@@ -1514,6 +1738,75 @@ class Model_Restmancard_Org extends Model
     }
 
     /**
+     * Применить правило главной корневой организации к карте дерева.
+     *
+     * Организация organizations.root_divcode (по умолчанию dv_All) всегда
+     * становится единственным корнем: если в API у неё задан parent, связь
+     * отбрасывается; все прочие корневые узлы (parent = null или ссылка на
+     * отсутствующую организацию) добавляются ей в дети. Так «Все» всегда
+     * находится в самом верху, а остальные организации «растут» из неё.
+     *
+     * Если настройка пуста или главной организации нет в списке, карта не
+     * меняется и дерево строится по данным API.
+     *
+     * @param   array  $children_map
+     * @param   array  $root_codes
+     * @param   array  $nodes
+     * @return  string|NULL  код главной организации или NULL
+     */
+    protected function _apply_main_root(array & $children_map, array & $root_codes, array $nodes)
+    {
+        $root = $this->rootDivcode();
+
+        if ($root === NULL OR ! isset($nodes[$root]))
+        {
+            return NULL;
+        }
+
+        // Главная организация не может быть потомком другой организации.
+        foreach (array_keys($children_map) as $parent_code)
+        {
+            $children = array();
+
+            foreach ($children_map[$parent_code] as $child_code)
+            {
+                if ($child_code !== $root)
+                {
+                    $children[] = $child_code;
+                }
+            }
+
+            if (empty($children))
+            {
+                unset($children_map[$parent_code]);
+            }
+            else
+            {
+                $children_map[$parent_code] = $children;
+            }
+        }
+
+        // Все прочие корневые организации становятся детьми главной.
+        if ( ! isset($children_map[$root]))
+        {
+            $children_map[$root] = array();
+        }
+
+        foreach ($root_codes as $code)
+        {
+            if ($code !== $root)
+            {
+                $children_map[$root][] = $code;
+            }
+        }
+
+        $children_map[$root] = array_values(array_unique($children_map[$root]));
+        $root_codes = array($root);
+
+        return $root;
+    }
+
+    /**
      * Выбрать организацию, к которой относится список сотрудников.
      *
      * @param   array  $nodes
@@ -1540,9 +1833,11 @@ class Model_Restmancard_Org extends Model
             }
         }
 
-        if (isset($nodes['dv_All']))
+        $root = $this->rootDivcode();
+
+        if ($root !== NULL AND isset($nodes[$root]))
         {
-            return 'dv_All';
+            return $root;
         }
 
         if ( ! empty($root_codes))

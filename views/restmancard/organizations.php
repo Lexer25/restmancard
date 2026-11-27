@@ -11,6 +11,9 @@
  * и меняет только свойства (PUT /api/v2/organizations/{divcode}). Кнопка
  * «Сохранить» панели категорий вызывает restmancard/save_access и меняет
  * только набор категорий (PUT /api/v2/organizations/{divcode}/accessnames).
+ * Если набор изменён, перед сохранением открывается окно выбора области
+ * применения: только организация или ещё дочерние организации и сотрудники
+ * (scope=org|cascade).
  *
  * @var array  $tree
  * @var string $error
@@ -30,7 +33,7 @@
  * @var bool   $access_editable
  */
 ?>
-<?php echo HTML::style('static/css/restmancard.css?v=2.0.0&layout=3col'); ?>
+<?php echo HTML::style('static/css/restmancard.css?v=2.2.0&layout=3col'); ?>
 
 <div class="panel panel-primary rc-root rc-orgs">
     <div class="panel-heading">
@@ -209,7 +212,7 @@
                                     <option value=""><?php echo __('— Корневая организация —'); ?></option>
                                 </select>
                                 <p class="help-block">
-                                    <?php echo __('Пусто — организация станет корневой. Саму организацию и её подразделения выбрать нельзя.'); ?>
+                                    <?php echo __('Пусто — организация будет в корне главной организации. Саму организацию и её подразделения выбрать нельзя.'); ?>
                                 </p>
                             </div>
 
@@ -335,6 +338,64 @@
     </div>
 </div>
 
+<!-- ===== Модальное окно: как применить изменения категорий ===== -->
+<div class="modal fade" id="rc-access-scope-modal" tabindex="-1" role="dialog" aria-labelledby="rc-access-scope-title">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="<?php echo __('Закрыть'); ?>">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+                <h4 class="modal-title" id="rc-access-scope-title">
+                    <span class="glyphicon glyphicon-random"></span>
+                    <?php echo __('Как применить изменения?'); ?>
+                </h4>
+            </div>
+
+            <div class="modal-body">
+                <p class="rc-access-scope-intro">
+                    <?php echo __('Набор категорий доступа организации изменён:'); ?>
+                    <strong id="rc-access-scope-org">—</strong>
+                </p>
+
+                <div class="rc-access-scope-diff" id="rc-access-scope-diff"></div>
+
+                <div class="rc-access-scope-option">
+                    <label for="rc-access-scope-cascade">
+                        <input type="radio" name="rc-access-scope" id="rc-access-scope-cascade"
+                               value="cascade">
+                        <strong><?php echo __('Применить к группе и сотрудникам, входящим в организацию'); ?></strong>
+                    </label>
+                    <p class="help-block" id="rc-access-scope-cascade-hint">
+                        <?php echo __('Добавить или снять категории у всех дочерних организаций и у сотрудников, входящих в выбранную организацию. Наборы сотрудников дочерних организаций не меняются.'); ?>
+                    </p>
+                </div>
+
+                <div class="rc-access-scope-option">
+                    <label for="rc-access-scope-org-only">
+                        <input type="radio" name="rc-access-scope" id="rc-access-scope-org-only"
+                               value="org">
+                        <strong><?php echo __('Применить изменения только к организации'); ?></strong>
+                    </label>
+                    <p class="help-block">
+                        <?php echo __('Изменить набор только у выбранной организации. Дочерние организации и сотрудники останутся без изменений.'); ?>
+                    </p>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">
+                    <?php echo __('Отмена'); ?>
+                </button>
+                <button type="button" class="btn btn-primary" id="rc-access-scope-apply" disabled>
+                    <span class="glyphicon glyphicon-ok"></span>
+                    <?php echo __('Применить'); ?>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 window.RESTMANCARD_ORGS = <?php echo $data_json; ?>;
 </script>
@@ -383,6 +444,10 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
     var $accessAlertText = $('#rc-access-alert-text');
     var $accessSaveBtn = $('#rc-access-save');
     var $accessSaveText = $('#rc-access-save-text');
+    var $scopeModal = $('#rc-access-scope-modal');
+    var $scopeOrg = $('#rc-access-scope-org');
+    var $scopeDiff = $('#rc-access-scope-diff');
+    var $scopeCascadeHint = $('#rc-access-scope-cascade-hint');
 
     var selectedUid = null;
     var accessRequest = 0;
@@ -392,6 +457,8 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
     var searchTimer = null;
     var saveBusy = false;
     var accessBusy = false;
+    var pendingAccess = null;
+    var scopeSubmitting = false;
 
     // ===== Вспомогательные функции =====
 
@@ -902,6 +969,175 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
         $accessSaveText.text(busy ? '<?php echo __('Сохранение...'); ?>' : '<?php echo __('Сохранить'); ?>');
     }
 
+    // ===== Выбор области применения изменений =====
+
+    // Название категории по её идентификатору: строка списка флажков.
+    function categoryName(id) {
+        var key = String(id);
+        var name = '';
+        var $input = $accessList.find('input.rc-access-check').filter(function () {
+            return String($(this).val()) === key;
+        }).first();
+
+        if ($input.length) {
+            name = $.trim($input.closest('.rc-access-item').find('.rc-access-name').text());
+        }
+
+        return name !== '' ? name : ('ID ' + key);
+    }
+
+    // Разница «было / стало» для набора, который отправляется в API.
+    function diffIds(oldIds, newIds) {
+        var oldMap = {};
+        var newMap = {};
+        var added = [];
+        var removed = [];
+        var i;
+
+        for (i = 0; i < oldIds.length; i++) {
+            oldMap[String(oldIds[i])] = true;
+        }
+
+        for (i = 0; i < newIds.length; i++) {
+            newMap[String(newIds[i])] = true;
+        }
+
+        for (i = 0; i < newIds.length; i++) {
+            if (!oldMap[String(newIds[i])]) {
+                added.push(Number(newIds[i]));
+            }
+        }
+
+        for (i = 0; i < oldIds.length; i++) {
+            if (!newMap[String(oldIds[i])]) {
+                removed.push(Number(oldIds[i]));
+            }
+        }
+
+        added.sort(function (a, b) { return a - b; });
+        removed.sort(function (a, b) { return a - b; });
+
+        return {
+            added: added,
+            removed: removed,
+            changed: (added.length + removed.length) > 0
+        };
+    }
+
+    // Сколько дочерних организаций (всех уровней) у выбранной организации.
+    function childrenCount(divcode) {
+        var needle = String(divcode || '').toLowerCase();
+
+        if (needle === '') {
+            return 0;
+        }
+
+        var children = {};
+
+        $.each(DATA.orgs, function (uid, org) {
+            if (!org || !org.divcode || !org.parent) {
+                return;
+            }
+
+            var parent = String(org.parent).toLowerCase();
+
+            if (!children[parent]) {
+                children[parent] = [];
+            }
+
+            children[parent].push(String(org.divcode));
+        });
+
+        var queue = children[needle] ? children[needle].slice() : [];
+        var seen = {};
+        var count = 0;
+        var guard = 0;
+
+        while (queue.length && guard < 10000) {
+            guard++;
+
+            var code = queue.shift();
+            var key = code.toLowerCase();
+
+            if (seen[key]) {
+                continue;
+            }
+
+            seen[key] = true;
+            count++;
+
+            if (children[key]) {
+                queue = queue.concat(children[key]);
+            }
+        }
+
+        return count;
+    }
+
+    function renderScopeDiff(diff) {
+        var html = '';
+        var i;
+
+        if (diff.added.length) {
+            html += '<div class="rc-access-scope-group">'
+                + '<span class="label label-success">'
+                + esc(<?php echo json_encode(__('Будет добавлено')); ?>)
+                + '</span><ul>';
+
+            for (i = 0; i < diff.added.length; i++) {
+                html += '<li>' + esc(categoryName(diff.added[i]))
+                    + ' <span class="text-muted">(ID ' + diff.added[i] + ')</span></li>';
+            }
+
+            html += '</ul></div>';
+        }
+
+        if (diff.removed.length) {
+            html += '<div class="rc-access-scope-group">'
+                + '<span class="label label-danger">'
+                + esc(<?php echo json_encode(__('Будет снято')); ?>)
+                + '</span><ul>';
+
+            for (i = 0; i < diff.removed.length; i++) {
+                html += '<li>' + esc(categoryName(diff.removed[i]))
+                    + ' <span class="text-muted">(ID ' + diff.removed[i] + ')</span></li>';
+            }
+
+            html += '</ul></div>';
+        }
+
+        $scopeDiff.html(html);
+    }
+
+    function openAccessScopeModal(org, nextIds, diff) {
+        var count = childrenCount(org.divcode);
+        var hint = <?php echo json_encode(__('Добавить или снять категории у всех дочерних организаций и у сотрудников, входящих в выбранную организацию. Наборы сотрудников дочерних организаций не меняются.')); ?>;
+
+        if (count > 0) {
+            hint += ' '
+                + <?php echo json_encode(__('Дочерних организаций в дереве:')); ?>
+                + ' ' + count + '.';
+        }
+
+        $scopeOrg.text(org.name + ' [' + org.divcode + ']');
+        $scopeCascadeHint.text(hint);
+        renderScopeDiff(diff);
+
+        // Пока действие не выбрано, «Применить» заблокирована: каскад не
+        // должен срабатывать по умолчанию.
+        $('input[name="rc-access-scope"]').prop('checked', false);
+        $('#rc-access-scope-apply').prop('disabled', true);
+
+        pendingAccess = {
+            org: org,
+            ids: nextIds,
+            diff: diff
+        };
+
+        scopeSubmitting = false;
+        $scopeModal.modal('show');
+    }
+
     function loadAccess(org) {
         var seq = ++accessRequest;
 
@@ -1116,7 +1352,9 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
 
     // ===== Сохранение набора категорий доступа =====
 
-    function saveAccessSet() {
+    // Вызывается кнопкой «Сохранить»: сначала считает разницу и, если набор
+    // изменился, открывает окно выбора области применения.
+    function requestAccessSave() {
         if (accessBusy || !accessEditable || !accessLoaded) {
             return;
         }
@@ -1127,6 +1365,36 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
             return;
         }
 
+        var nextIds = checkedAccessIds();
+        var diff = diffIds(accessAssigned, nextIds);
+
+        if (!diff.changed) {
+            // Набор не изменился: каскад не нужен, сохраняем как есть.
+            pendingAccess = { org: org, ids: nextIds, diff: diff };
+            submitAccessSave('org');
+            return;
+        }
+
+        openAccessScopeModal(org, nextIds, diff);
+    }
+
+    // Отправляет набор с выбранной областью применения:
+    //   org     — только организация;
+    //   cascade — организация + дочерние организации + сотрудники.
+    function submitAccessSave(scope) {
+        if (accessBusy || !pendingAccess) {
+            return;
+        }
+
+        if (scope !== 'cascade') {
+            scope = 'org';
+        }
+
+        var pending = pendingAccess;
+        pendingAccess = null;
+        scopeSubmitting = true;
+
+        $scopeModal.modal('hide');
         hideAccessAlert();
         setAccessBusy(true);
         setAccessControlsEnabled(false);
@@ -1135,8 +1403,9 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
             url: saveAccessUrl,
             type: 'POST',
             data: {
-                divcode: org.divcode,
-                access: checkedAccessIds()
+                divcode: pending.org.divcode,
+                access: pending.ids,
+                scope: scope
             },
             dataType: 'json'
         }).done(function (response) {
@@ -1149,12 +1418,23 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
                 return;
             }
 
-            accessAssigned = response.assigned || [];
+            // Ответ PUT может не содержать набора — тогда оставляем отправленный.
+            accessAssigned = (response.assigned && response.assigned.length)
+                ? response.assigned
+                : pending.ids.slice();
             applyAccessAssigned();
             setAccessControlsEnabled(true);
             clearAccessDirty();
-            showAccessAlert(response.message
-                || <?php echo json_encode(__('Набор категорий доступа сохранён')); ?>, 'success');
+
+            var warnings = response.warnings || [];
+            var message = response.message
+                || <?php echo json_encode(__('Набор категорий доступа сохранён')); ?>;
+
+            if (warnings.length) {
+                showAccessAlert(message + ' ' + warnings.join(' '), 'warning');
+            } else {
+                showAccessAlert(message, 'success');
+            }
 
             if (accessUnknown.length) {
                 setAccessStatus(
@@ -1163,6 +1443,8 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
                     + esc(<?php echo json_encode(__('Они сохранены без изменений.')); ?>),
                     'warning'
                 );
+            } else if (warnings.length) {
+                setAccessStatus(esc(message), 'warning');
             } else {
                 setAccessStatus(
                     esc(<?php echo json_encode(__('Набор сохранён. Категорий')); ?>)
@@ -1183,12 +1465,38 @@ window.RESTMANCARD_ORGS_CFG = <?php echo json_encode(array(
             }
 
             showAccessAlert(message, 'danger');
+        }).always(function () {
+            scopeSubmitting = false;
         });
     }
 
+    $('#rc-access-scope-apply').on('click', function () {
+        var scope = $('input[name="rc-access-scope"]:checked').val();
+
+        if (!scope) {
+            return;
+        }
+
+        submitAccessSave(scope === 'cascade' ? 'cascade' : 'org');
+    });
+
+    $scopeModal.on('change', 'input[name="rc-access-scope"]', function () {
+        $('#rc-access-scope-apply').prop(
+            'disabled',
+            $('input[name="rc-access-scope"]:checked').length === 0
+        );
+    });
+
+    // Закрытие окна без применения сбрасывает подготовленный набор.
+    $scopeModal.on('hidden.bs.modal', function () {
+        if (!scopeSubmitting) {
+            pendingAccess = null;
+        }
+    });
+
     $('#rc-access-form').on('submit', function (event) {
         event.preventDefault();
-        saveAccessSet();
+        requestAccessSave();
     });
 
     // ===== Организация, изменённая последней =====
